@@ -1,6 +1,5 @@
 pub mod calculator;
 pub mod packet;
-pub mod scanner;
 
 use std::net::Ipv4Addr;
 use std::str::FromStr;

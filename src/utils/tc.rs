@@ -28,7 +28,7 @@
 //   Stage 2 — ifb0 egress (inside add_htb_leaf()):
 //     By the time a packet reaches ifb0's egress qdisc, netfilter has already
 //     processed it through PREROUTING (conntrack entry lookup) and the
-//     harbor_mangle FORWARD chain has set:
+//     harper_mangle FORWARD chain has set:
 //       ip daddr <victim>  ct mark != 0  meta mark set ct mark
 //     So the packet now carries the victim's slot as its fwmark.
 //     The fw filter on ifb0 matches correctly and routes into the HTB class.
@@ -64,11 +64,24 @@
 //            └── sfq
 
 use std::collections::HashMap;
-use std::io::Write as _;
 use std::net::Ipv4Addr;
-use std::process::{Command, Stdio};
+
+use tokio::io::AsyncWriteExt as _;
+use std::process::Stdio;
+use tokio::process::Command;
 
 use crate::host::table::HostId;
+use crate::infra::Cleanupable;
+
+impl Cleanupable for TcManager {
+    fn cleanup(&mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Box<dyn std::error::Error>>> + Send + '_>> {
+        let tc = self;
+        Box::pin(async move {
+            tc.cleanup().await;
+            Ok(())
+        })
+    }
+}
 
 const IFB_DEV: &str = "ifb0";
 const LINE_RATE: &str = "1000mbit";
@@ -79,7 +92,7 @@ const SLOT_PASSTHROUGH: u16 = 0xFFF;
 const SLOT_MIN: u16 = 2;
 const KERNEL_HZ: u64 = 100;
 const BURST_MIN_BYTES: u64 = 1_600;
-const NFT_TABLE: &str = "harbor";
+const NFT_TABLE: &str = "harper";
 const NFT_CHAIN: &str = "FORWARD";
 
 #[derive(Debug)]
@@ -126,28 +139,18 @@ impl TcManager {
         }
     }
 
-    pub fn init(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn init(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         for module in &["ifb", "act_mirred", "sch_htb", "sch_sfq", "cls_fw"] {
-            let _ = Command::new("modprobe").arg(module).output();
+            let _ = Command::new("modprobe").arg(module).output().await;
         }
 
-        self.teardown_tc();
-        self.teardown_nft();
+        self.teardown_tc().await;
+        self.teardown_nft().await;
 
         // IFB virtual device
-        let _ = run(&["ip", "link", "add", IFB_DEV, "type", "ifb"]);
-        run_check(&["ip", "link", "set", IFB_DEV, "up"])?;
+        let _ = run(&["ip", "link", "add", IFB_DEV, "type", "ifb"]).await;
+        run_check(&["ip", "link", "set", IFB_DEV, "up"]).await?;
 
-        // ── Ingress qdisc on physical NIC + catch-all redirect to ifb0 ────────
-        //
-        // ONE filter, installed once at init time, redirects ALL ingress traffic
-        // (protocol all) to ifb0.  "action connmark" restores any existing
-        // connection-tracking mark onto the skb so that ifb0's fw filters can
-        // classify it immediately.
-        //
-        // This is the correct architecture for gateway/MITM ingress shaping.
-        // The previous per-victim fw filter approach was wrong because download
-        // packets arrive at ingress BEFORE netfilter sets the mark.
         run_check(&[
             "tc",
             "qdisc",
@@ -157,7 +160,7 @@ impl TcManager {
             "handle",
             "ffff:",
             "ingress",
-        ])?;
+        ]).await?;
         run_check(&[
             "tc",
             "filter",
@@ -181,7 +184,7 @@ impl TcManager {
             "redirect",
             "dev",
             IFB_DEV,
-        ])?;
+        ]).await?;
 
         // HTB root on physical NIC (upload / egress)
         run_check(&[
@@ -196,8 +199,8 @@ impl TcManager {
             "htb",
             "default",
             &format!("{:x}", SLOT_PASSTHROUGH),
-        ])?;
-        self.add_root_classes(&self.interface.clone(), HANDLE_EGRESS)?;
+        ]).await?;
+        self.add_root_classes(&self.interface.clone(), HANDLE_EGRESS).await?;
 
         // HTB root on IFB (download / redirected ingress)
         run_check(&[
@@ -212,30 +215,30 @@ impl TcManager {
             "htb",
             "default",
             &format!("{:x}", SLOT_PASSTHROUGH),
-        ])?;
-        self.add_root_classes(IFB_DEV, HANDLE_INGRESS)?;
+        ]).await?;
+        self.add_root_classes(IFB_DEV, HANDLE_INGRESS).await?;
 
-        self.nft_create_table()?;
+        self.nft_create_table().await?;
 
         self.initialized = true;
         println!("[+] tc: initialized on {} / {}", self.interface, IFB_DEV);
         Ok(())
     }
 
-    fn ensure_init(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn ensure_init(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if !self.initialized {
-            self.init()?;
+            self.init().await?;
         }
         Ok(())
     }
 
-    pub fn limit_host(
+    pub async fn limit_host(
         &mut self,
         host_id: HostId,
         ip: Ipv4Addr,
         kbps: u64,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.ensure_init()?;
+        self.ensure_init().await?;
 
         let new_mode = if kbps == 0 {
             ShapeMode::Blocked
@@ -246,7 +249,7 @@ impl TcManager {
         if let Some(existing) = self.hosts.get(&host_id).cloned() {
             match (existing.mode, new_mode) {
                 (ShapeMode::Limited(_), ShapeMode::Limited(new_kbps)) => {
-                    self.update_rate_classes(existing.slot, new_kbps)?;
+                    self.update_rate_classes(existing.slot, new_kbps).await?;
                     self.hosts.get_mut(&host_id).unwrap().mode = ShapeMode::Limited(new_kbps);
                     println!(
                         "[*] tc: host {} ({}) updated → {} kbps",
@@ -255,35 +258,36 @@ impl TcManager {
                     return Ok(());
                 }
                 _ => {
-                    self.remove_host_inner(host_id)?;
+                    self.remove_host_inner(host_id).await?;
                 }
             }
         }
 
-        self.add_host_inner(host_id, ip, new_mode)
+        self.add_host_inner(host_id, ip, new_mode).await
     }
 
-    pub fn remove_host(&mut self, host_id: HostId) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn remove_host(&mut self, host_id: HostId) -> Result<(), Box<dyn std::error::Error>> {
         if !self.initialized {
             return Ok(());
         }
-        self.remove_host_inner(host_id)
+        self.remove_host_inner(host_id).await
     }
 
-    pub fn limit_range(&mut self, entries: &[(HostId, Ipv4Addr)], kbps: u64) -> Vec<TcError> {
-        entries
-            .iter()
-            .filter_map(|&(id, ip)| {
-                self.limit_host(id, ip, kbps).err().map(|e| TcError {
+    pub async fn limit_range(&mut self, entries: &[(HostId, Ipv4Addr)], kbps: u64) -> Vec<TcError> {
+        let mut errors = Vec::new();
+        for &(id, ip) in entries {
+            if let Err(e) = self.limit_host(id, ip, kbps).await {
+                errors.push(TcError {
                     host_id: id,
                     message: e.to_string(),
-                })
-            })
-            .collect()
+                });
+            }
+        }
+        errors
     }
 
-    pub fn limit_all(&mut self, entries: &[(HostId, Ipv4Addr)], kbps: u64) -> Vec<TcError> {
-        self.limit_range(entries, kbps)
+    pub async fn limit_all(&mut self, entries: &[(HostId, Ipv4Addr)], kbps: u64) -> Vec<TcError> {
+        self.limit_range(entries, kbps).await
     }
 
     pub fn is_shaping(&self, host_id: HostId) -> bool {
@@ -297,23 +301,21 @@ impl TcManager {
         })
     }
 
-    pub fn cleanup(&mut self) {
+    pub async fn cleanup(&mut self) {
         if !self.initialized {
             return;
         }
-        self.teardown_tc();
-        self.teardown_nft();
+        self.teardown_tc().await;
+        self.teardown_nft().await;
         self.hosts.clear();
         self.initialized = false;
         println!("[+] tc: cleanup complete — network state restored");
     }
 }
 
-impl Drop for TcManager {
-    fn drop(&mut self) {
-        self.cleanup();
-    }
-}
+// Drop intentionally omitted — cleanup() is async and callers must call it
+// explicitly. The old sync Drop impl can't be maintained with async teardown.
+// Both main.rs and gateway_mode.rs already call cleanup() on shutdown.
 
 impl TcManager {
     fn alloc_slot(&mut self) -> u16 {
@@ -330,7 +332,7 @@ impl TcManager {
         }
     }
 
-    fn add_root_classes(&self, dev: &str, handle: &str) -> Result<(), Box<dyn std::error::Error>> {
+    async fn add_root_classes(&self, dev: &str, handle: &str) -> Result<(), Box<dyn std::error::Error>> {
         let major = handle.trim_end_matches(':');
         let root_class = format!("{}:1", major);
         let pass_class = format!("{}:{:x}", major, SLOT_PASSTHROUGH);
@@ -348,7 +350,7 @@ impl TcManager {
             "htb",
             "rate",
             LINE_RATE,
-        ])?;
+        ]).await?;
         run_check(&[
             "tc",
             "class",
@@ -362,11 +364,11 @@ impl TcManager {
             "htb",
             "rate",
             LINE_RATE,
-        ])?;
+        ]).await?;
         Ok(())
     }
 
-    fn add_host_inner(
+    async fn add_host_inner(
         &mut self,
         host_id: HostId,
         ip: Ipv4Addr,
@@ -379,8 +381,8 @@ impl TcManager {
             ShapeMode::Limited(k) => k,
             ShapeMode::Blocked => 0,
         };
-        self.add_htb_leaf(slot, kbps)?;
-        self.nft_rebuild_chain()?;
+        self.add_htb_leaf(slot, kbps).await?;
+        self.nft_rebuild_chain().await?;
 
         match mode {
             ShapeMode::Limited(k) => {
@@ -391,18 +393,18 @@ impl TcManager {
         Ok(())
     }
 
-    fn remove_host_inner(&mut self, host_id: HostId) -> Result<(), Box<dyn std::error::Error>> {
+    async fn remove_host_inner(&mut self, host_id: HostId) -> Result<(), Box<dyn std::error::Error>> {
         let info = match self.hosts.remove(&host_id) {
             Some(s) => s,
             None => return Ok(()),
         };
-        self.remove_htb_leaf(info.slot);
-        self.nft_rebuild_chain()?;
+        self.remove_htb_leaf(info.slot).await;
+        self.nft_rebuild_chain().await?;
         println!("[+] tc: shaping removed for host {}", host_id);
         Ok(())
     }
 
-    fn add_htb_leaf(&self, slot: u16, kbps: u64) -> Result<(), Box<dyn std::error::Error>> {
+    async fn add_htb_leaf(&self, slot: u16, kbps: u64) -> Result<(), Box<dyn std::error::Error>> {
         let rate_str = if kbps == 0 {
             "1bit".to_string()
         } else {
@@ -442,7 +444,7 @@ impl TcManager {
                 &rate_str,
                 "burst",
                 &burst,
-            ])?;
+            ]).await?;
             run_check(&[
                 "tc",
                 "qdisc",
@@ -456,7 +458,7 @@ impl TcManager {
                 "sfq",
                 "perturb",
                 "10",
-            ])?;
+            ]).await?;
             run_check(&[
                 "tc",
                 "filter",
@@ -472,7 +474,7 @@ impl TcManager {
                 "fw",
                 "flowid",
                 &classid,
-            ])?;
+            ]).await?;
         }
 
         // ── NO per-victim ingress filter here ─────────────────────────────────
@@ -512,7 +514,7 @@ impl TcManager {
                 &rate_str,
                 "burst",
                 &burst,
-            ])?;
+            ]).await?;
             run_check(&[
                 "tc",
                 "qdisc",
@@ -526,7 +528,7 @@ impl TcManager {
                 "sfq",
                 "perturb",
                 "10",
-            ])?;
+            ]).await?;
             run_check(&[
                 "tc",
                 "filter",
@@ -542,17 +544,13 @@ impl TcManager {
                 "fw",
                 "flowid",
                 &classid,
-            ])?;
+            ]).await?;
         }
 
         Ok(())
     }
 
-    fn remove_htb_leaf(&self, slot: u16) {
-        // No per-victim ingress filter to remove — the catch-all redirect
-        // lives at the qdisc level in init() and is torn down by teardown_tc().
-
-        // Remove HTB classes + leaf qdiscs from both devices
+    async fn remove_htb_leaf(&self, slot: u16) {
         for (dev, tree) in [
             (self.interface.as_str(), HANDLE_EGRESS),
             (IFB_DEV, HANDLE_INGRESS),
@@ -570,12 +568,12 @@ impl TcManager {
                 &classid,
                 "handle",
                 &leaf_handle,
-            ]);
-            let _ = run(&["tc", "class", "del", "dev", dev, "classid", &classid]);
+            ]).await;
+            let _ = run(&["tc", "class", "del", "dev", dev, "classid", &classid]).await;
         }
     }
 
-    fn update_rate_classes(&self, slot: u16, kbps: u64) -> Result<(), Box<dyn std::error::Error>> {
+    async fn update_rate_classes(&self, slot: u16, kbps: u64) -> Result<(), Box<dyn std::error::Error>> {
         let rate_str = format!("{}kbit", kbps);
         let burst = burst_for(kbps);
 
@@ -604,22 +602,22 @@ impl TcManager {
                 &rate_str,
                 "burst",
                 &burst,
-            ])?;
+            ]).await?;
         }
         Ok(())
     }
 
-    fn teardown_tc(&self) {
-        let _ = run(&["tc", "qdisc", "del", "dev", &self.interface, "root"]);
-        let _ = run(&["tc", "qdisc", "del", "dev", &self.interface, "ingress"]);
-        let _ = run(&["tc", "qdisc", "del", "dev", IFB_DEV, "root"]);
-        let _ = run(&["ip", "link", "set", IFB_DEV, "down"]);
-        let _ = run(&["ip", "link", "del", IFB_DEV]);
+    async fn teardown_tc(&self) {
+        let _ = run(&["tc", "qdisc", "del", "dev", &self.interface, "root"]).await;
+        let _ = run(&["tc", "qdisc", "del", "dev", &self.interface, "ingress"]).await;
+        let _ = run(&["tc", "qdisc", "del", "dev", IFB_DEV, "root"]).await;
+        let _ = run(&["ip", "link", "set", IFB_DEV, "down"]).await;
+        let _ = run(&["ip", "link", "del", IFB_DEV]).await;
     }
 }
 
 impl TcManager {
-    fn nft_create_table(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn nft_create_table(&self) -> Result<(), Box<dyn std::error::Error>> {
         let ruleset = format!(
             "table ip {table} {{\n\
              \tchain {chain} {{\n\
@@ -629,10 +627,10 @@ impl TcManager {
             table = NFT_TABLE,
             chain = NFT_CHAIN,
         );
-        nft_apply(&ruleset)
+        nft_apply(&ruleset).await
     }
 
-    fn nft_rebuild_chain(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn nft_rebuild_chain(&self) -> Result<(), Box<dyn std::error::Error>> {
         let mut rules = String::new();
 
         for slot_info in self.hosts.values() {
@@ -664,7 +662,7 @@ impl TcManager {
             }
         }
 
-        let _ = nft_run(&["flush", "chain", "ip", NFT_TABLE, NFT_CHAIN]);
+        let _ = nft_run(&["flush", "chain", "ip", NFT_TABLE, NFT_CHAIN]).await;
 
         let ruleset = format!(
             "table ip {table} {{\n\
@@ -678,11 +676,11 @@ impl TcManager {
             rules = rules,
         );
 
-        nft_apply(&ruleset)
+        nft_apply(&ruleset).await
     }
 
-    fn teardown_nft(&self) {
-        let _ = nft_run(&["delete", "table", "ip", NFT_TABLE]);
+    async fn teardown_nft(&self) {
+        let _ = nft_run(&["delete", "table", "ip", NFT_TABLE]).await;
     }
 }
 
@@ -696,9 +694,9 @@ pub(crate) fn burst_for(kbps: u64) -> String {
     format!("{}b", burst_bytes)
 }
 
-fn run(args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
+async fn run(args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
     let (prog, rest) = args.split_first().ok_or("empty command")?;
-    let out = Command::new(prog).args(rest).output()?;
+    let out = Command::new(prog).args(rest).output().await?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
@@ -709,19 +707,20 @@ fn run(args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
     }
 }
 
-fn run_check(args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_check(args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
     run(args)
+        .await
         .map(|_| ())
         .map_err(|e| format!("{} failed: {}", args.join(" "), e).into())
 }
 
-fn nft_run(args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
+async fn nft_run(args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
     let mut full = vec!["nft"];
     full.extend_from_slice(args);
-    run(&full)
+    run(&full).await
 }
 
-fn nft_apply(ruleset: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn nft_apply(ruleset: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut child = Command::new("nft")
         .arg("-f")
         .arg("-")
@@ -734,11 +733,13 @@ fn nft_apply(ruleset: &str) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(mut stdin) = child.stdin.take() {
         stdin
             .write_all(ruleset.as_bytes())
+            .await
             .map_err(|e| format!("nft stdin write: {e}"))?;
     }
 
     let out = child
         .wait_with_output()
+        .await
         .map_err(|e| format!("nft -f - wait: {e}"))?;
 
     if out.status.success() {
@@ -845,25 +846,25 @@ mod tests {
         assert_eq!(m.current_kbps(1), Some(0));
     }
 
-    #[test]
-    fn test_cleanup_uninit_noop() {
+    #[tokio::test]
+    async fn test_cleanup_uninit_noop() {
         let mut m = make();
-        m.cleanup();
+        m.cleanup().await;
         assert!(!m.initialized);
     }
 
-    #[test]
-    fn test_cleanup_twice_safe() {
+    #[tokio::test]
+    async fn test_cleanup_twice_safe() {
         let mut m = make();
-        m.cleanup();
-        m.cleanup();
+        m.cleanup().await;
+        m.cleanup().await;
     }
 
-    #[test]
-    fn test_batch_empty_no_errors() {
+    #[tokio::test]
+    async fn test_batch_empty_no_errors() {
         let mut m = make();
         m.initialized = true;
-        assert!(m.limit_range(&[], 1_000).is_empty());
+        assert!(m.limit_range(&[], 1_000).await.is_empty());
     }
 
     #[test]
@@ -873,15 +874,15 @@ mod tests {
         assert_ne!(ShapeMode::Limited(100), ShapeMode::Blocked);
     }
 
-    #[test]
+    #[tokio::test]
     #[ignore]
-    fn test_live_full_cycle() {
+    async fn test_live_full_cycle() {
         let mut m = TcManager::new("lo");
-        m.init().unwrap();
-        m.limit_host(1, Ipv4Addr::new(127, 0, 0, 1), 1_000).unwrap();
+        m.init().await.unwrap();
+        m.limit_host(1, Ipv4Addr::new(127, 0, 0, 1), 1_000).await.unwrap();
         assert_eq!(m.current_kbps(1), Some(1_000));
-        m.remove_host(1).unwrap();
+        m.remove_host(1).await.unwrap();
         assert!(!m.is_shaping(1));
-        m.cleanup();
+        m.cleanup().await;
     }
 }

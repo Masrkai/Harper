@@ -31,10 +31,7 @@ impl PacketForwarder {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         use pnet::datalink::{self, Channel};
 
-        let interfaces = datalink::interfaces();
-        let iface = interfaces
-            .into_iter()
-            .find(|i| i.name == interface_name)
+        let iface = crate::utils::net::get_interface(interface_name)
             .ok_or("forwarder: interface not found")?;
 
         let (fwd_sender, fwd_receiver) = match datalink::channel(&iface, Default::default()) {

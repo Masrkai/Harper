@@ -152,10 +152,7 @@ impl PoisonLoop {
 fn open_sender(
     interface_name: &str,
 ) -> Result<Box<dyn DataLinkSender>, Box<dyn std::error::Error + Send + Sync>> {
-    let interfaces = datalink::interfaces();
-    let iface = interfaces
-        .into_iter()
-        .find(|i| i.name == interface_name)
+    let iface = crate::utils::net::get_interface(interface_name)
         .ok_or_else(|| format!("PoisonLoop: interface '{}' not found", interface_name))?;
 
     match datalink::channel(&iface, Default::default()) {

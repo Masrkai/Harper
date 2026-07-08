@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use pnet::datalink;
+use crate::utils::net::get_interface;
 use pnet::ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
 
 /// Pure logic — testable without real interfaces.
@@ -13,8 +13,7 @@ pub(crate) fn first_ipv4_cidr(ips: &[pnet::ipnetwork::IpNetwork]) -> Option<Stri
 }
 
 pub fn get_cidr(interface_name: &str) -> Option<String> {
-    let interfaces = datalink::interfaces();
-    let iface = interfaces.iter().find(|i| i.name == interface_name)?;
+    let iface = get_interface(interface_name)?;
     first_ipv4_cidr(&iface.ips)
 }
 
