@@ -3,19 +3,6 @@
 version = 4
 
 [[package]]
-name = "Harbor"
-version = "0.1.0"
-dependencies = [
- "clap",
- "ctrlc",
- "nix 0.31.2",
- "oui-data",
- "pnet",
- "rtnetlink",
- "tokio",
-]
-
-[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -306,6 +293,19 @@ name = "glob"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
+
+[[package]]
+name = "harper"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "ctrlc",
+ "nix 0.31.2",
+ "oui-data",
+ "pnet",
+ "rtnetlink",
+ "tokio",
+]
 
 [[package]]
 name = "heck"

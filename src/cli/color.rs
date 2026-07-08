@@ -163,10 +163,10 @@ mod tests {
     fn test_paint_always_wraps_with_reset() {
         // Structural invariants that hold for any color/text combination.
         let color = Color(1, 2, 3);
-        let painted = color.paint("Harbor");
+        let painted = color.paint("harper");
         assert!(painted.starts_with("\x1b[38;2;"));
         assert!(painted.ends_with("\x1b[0m"));
-        assert!(painted.contains("Harbor"));
+        assert!(painted.contains("harper"));
     }
 
     // ── Color::from_hex ───────────────────────────────────────────────────────

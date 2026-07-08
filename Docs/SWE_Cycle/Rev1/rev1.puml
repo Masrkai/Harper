@@ -5,7 +5,7 @@ skinparam defaultFontName Monospaced
 skinparam ranksep 40
 skinparam nodesep 30
 
-title Harbor — Component Architecture
+title harper — Component Architecture
 
 ' ── Top: Entry ───────────────────────────────────────────────
 package "CLI / Entry" #LightBlue {
@@ -86,7 +86,7 @@ end note
 
 note bottom of TC
   Subprocess: tc + nft.
-  harbor_mangle → fwmark.
+  harper_mangle → fwmark.
   IFB for ingress shaping.
 end note
 

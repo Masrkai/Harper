@@ -19,7 +19,7 @@
 //
 // The fix: each PoisonLoop opens its own AF_PACKET socket on the interface
 // at construction time. The tradeoff is N file descriptors instead of 1,
-// which is negligible for Harbor's target scale (1–20 victims).
+// which is negligible for harper's target scale (1–20 victims).
 //
 // The main.rs `spoof_sender` Arc is no longer passed to SpooferEngine at all.
 

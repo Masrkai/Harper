@@ -1,6 +1,6 @@
-# QoS & Bandwidth Shaping — Harbor Technical Reference
+# QoS & Bandwidth Shaping — harper Technical Reference
 
-> **Scope:** How Harbor shapes traffic in both MITM mode and Gateway mode on a Linux/NixOS host.
+> **Scope:** How harper shapes traffic in both MITM mode and Gateway mode on a Linux/NixOS host.
 > The two modes share the same `tc` HTB + IFB + nftables plumbing; only *how traffic arrives* differs.
 
 ---
@@ -13,7 +13,7 @@
 
 **tc** (traffic control) operates at the network driver queue level, below netfilter. It *shapes* traffic by buffering packets and releasing them at the requested rate. It cannot perform complex matching on its own without help from nftables.
 
-The correct pattern — and the one Harbor uses — is:
+The correct pattern — and the one harper uses — is:
 
 ```
 nftables  →  stamps fwmark on packet (based on victim IP)
@@ -22,9 +22,9 @@ tc        →  matches fwmark, queues packet into the right HTB class
 
 ### 1.2 Two Modes, Same Plumbing
 
-**MITM Mode** (`src/main.rs`): Harbor is not the real router. It ARP-poisons the victim and gateway so that all victim ↔ internet traffic flows through Harbor's NIC. The `PacketForwarder` then relays packets in userspace. `ip_forward` is set to **0** so the kernel does not duplicate-forward what the userspace forwarder already handles.
+**MITM Mode** (`src/main.rs`): harper is not the real router. It ARP-poisons the victim and gateway so that all victim ↔ internet traffic flows through harper's NIC. The `PacketForwarder` then relays packets in userspace. `ip_forward` is set to **0** so the kernel does not duplicate-forward what the userspace forwarder already handles.
 
-**Gateway Mode** (`src/gateway_mode.rs`): Harbor *is* the router (hotspot / LAN gateway). No ARP poisoning. The kernel already routes traffic through this machine. Only `tc` shaping is applied via `TcManager`.
+**Gateway Mode** (`src/gateway_mode.rs`): harper *is* the router (hotspot / LAN gateway). No ARP poisoning. The kernel already routes traffic through this machine. Only `tc` shaping is applied via `TcManager`.
 
 Both modes call `TcManager::init()` and `TcManager::limit_host()` identically.
 
@@ -37,11 +37,11 @@ Understanding which kernel hook fires when is critical to getting the nftables m
 ### 2.1 Upload (victim → internet)
 
 ```
-[Victim] ──(Ethernet)──▶ [Harbor NIC: ingress]
+[Victim] ──(Ethernet)──▶ [harper NIC: ingress]
                                 │
                      ┌──────────┴───────────┐
                      │  Netfilter PREROUTING │  ← conntrack entry created/looked up
-                     │  Netfilter FORWARD    │  ← harbor_mangle chain fires here:
+                     │  Netfilter FORWARD    │  ← harper_mangle chain fires here:
                      │                       │    ip saddr <victim>
                      │                       │      meta mark set <slot>
                      │                       │      ct mark set meta mark
@@ -58,7 +58,7 @@ Understanding which kernel hook fires when is critical to getting the nftables m
 Linux `tc` can only natively shape **egress** (outgoing) traffic. Download packets *enter* the NIC — that is ingress — so a trick is required.
 
 ```
-[Internet] → [Gateway] ──(Ethernet)──▶ [Harbor NIC: ingress]
+[Internet] → [Gateway] ──(Ethernet)──▶ [harper NIC: ingress]
                                                 │
                               ┌─────────────────┴──────────────────┐
                               │  ingress qdisc (handle ffff:)       │
@@ -84,13 +84,13 @@ Download packets arrive at physical NIC ingress *before* the netfilter FORWARD h
 
 ## 3. HTB Hierarchy
 
-HTB (Hierarchical Token Bucket) is the `tc` qdisc Harbor uses. Key properties:
+HTB (Hierarchical Token Bucket) is the `tc` qdisc harper uses. Key properties:
 
 - `rate` — guaranteed minimum bandwidth for a class.
-- `ceil` — hard maximum (Harbor always sets `rate == ceil` for a strict cap, no borrowing).
+- `ceil` — hard maximum (harper always sets `rate == ceil` for a strict cap, no borrowing).
 - Classes are arranged in a tree; a root class sets the total interface ceiling.
 
-### Harbor's HTB Layout
+### harper's HTB Layout
 
 ```
 Physical NIC egress (upload):
@@ -117,7 +117,7 @@ Each victim gets two HTB leaf classes (one on the physical NIC tree for upload, 
 
 ### Burst Calculation
 
-HTB requires a `burst` parameter: the maximum number of bytes that can be sent instantaneously before the rate enforcer kicks in. Harbor calculates it in `burst_for(kbps)`:
+HTB requires a `burst` parameter: the maximum number of bytes that can be sent instantaneously before the rate enforcer kicks in. harper calculates it in `burst_for(kbps)`:
 
 ```
 burst = max(rate_bps / KERNEL_HZ, BURST_MIN_BYTES)
@@ -136,12 +136,12 @@ Each HTB leaf class has an SFQ (Stochastic Fairness Queuing) child qdisc (`sfq p
 
 ## 4. nftables Integration
 
-### 4.1 The `harbor_mangle` Table
+### 4.1 The `harper_mangle` Table
 
-Harbor creates and owns a dedicated nftables table (`harbor_mangle`) with a single chain (`FORWARD`) at `priority mangle`. This avoids interfering with the NixOS-generated `nixos-fw` ruleset.
+harper creates and owns a dedicated nftables table (`harper_mangle`) with a single chain (`FORWARD`) at `priority mangle`. This avoids interfering with the NixOS-generated `nixos-fw` ruleset.
 
 ```nft
-table ip harbor_mangle {
+table ip harper_mangle {
     chain FORWARD {
         type filter hook forward priority mangle; policy accept;
 
@@ -178,7 +178,7 @@ The NixOS default firewall (`nixos-fw`) has a `rpfilter-allow` chain that drops 
 
 ## 5. Blocking vs. Limiting
 
-When `kbps == 0`, Harbor uses `ShapeMode::Blocked`. Instead of dropping packets with a `tc` drop action (which causes aggressive TCP retransmission storms), it uses nftables `drop` rules in the FORWARD chain:
+When `kbps == 0`, harper uses `ShapeMode::Blocked`. Instead of dropping packets with a `tc` drop action (which causes aggressive TCP retransmission storms), it uses nftables `drop` rules in the FORWARD chain:
 
 ```nft
 ip saddr <victim> drop
@@ -207,10 +207,10 @@ This means adding or removing a host requires only: adding/removing two HTB clas
 |---|---|---|
 | Excess traffic | Buffered, released at rate | Dropped immediately |
 | TCP behaviour | Smooth, stable throughput | Retransmissions, choppy |
-| Used by Harbor | ✅ `limit_host()` | ❌ not used for rate-limiting |
+| Used by harper | ✅ `limit_host()` | ❌ not used for rate-limiting |
 | Used for blocking | ❌ | ✅ `ShapeMode::Blocked` |
 
-Harbor uses shaping for all rate-limited hosts and nftables drop only for full blocks.
+harper uses shaping for all rate-limited hosts and nftables drop only for full blocks.
 
 ---
 
@@ -224,7 +224,7 @@ tc qdisc del dev <iface> ingress    # removes ffff: and the catch-all filter
 tc qdisc del dev ifb0 root          # removes ifb0 HTB tree
 ip link set ifb0 down
 ip link del ifb0
-nft delete table ip harbor_mangle  # removes all marks and drop rules
+nft delete table ip harper_mangle  # removes all marks and drop rules
 ```
 
 All `tc` and `nftables` state is runtime-only and evaporates on reboot regardless of cleanup, but explicit teardown is essential to avoid leaving the victim in a degraded state mid-session.
@@ -235,13 +235,13 @@ All `tc` and `nftables` state is runtime-only and evaporates on reboot regardles
 
 | Concern | Detail |
 |---|---|
-| `nftables` vs `iptables` | Harbor uses `nft` directly. NixOS since 21.11 uses `nf_tables` under the hood for everything; there is no legacy `ip_tables` to conflict with. |
+| `nftables` vs `iptables` | harper uses `nft` directly. NixOS since 21.11 uses `nf_tables` under the hood for everything; there is no legacy `ip_tables` to conflict with. |
 | `tc` availability | `pkgs.iproute2` — available in any NixOS environment. |
-| Kernel modules | `ifb`, `act_mirred`, `sch_htb`, `sch_sfq`, `cls_fw` — Harbor loads them via `modprobe` at `init()` time. Add to `boot.kernelModules` for persistence. |
-| `rp_filter` | Must be `0` in MITM mode. Harbor sets it via `/proc/sys/net/ipv4/conf/all/rp_filter` and restores the original value on exit. |
-| `ip_forward` | Set to `0` in MITM mode (userspace forwarder only). Set to `1` separately if using Gateway mode without Harbor managing it. |
+| Kernel modules | `ifb`, `act_mirred`, `sch_htb`, `sch_sfq`, `cls_fw` — harper loads them via `modprobe` at `init()` time. Add to `boot.kernelModules` for persistence. |
+| `rp_filter` | Must be `0` in MITM mode. harper sets it via `/proc/sys/net/ipv4/conf/all/rp_filter` and restores the original value on exit. |
+| `ip_forward` | Set to `0` in MITM mode (userspace forwarder only). Set to `1` separately if using Gateway mode without harper managing it. |
 | NixOS firewall FORWARD policy | Default is `drop`. In MITM mode, `NftGate` adds an accept rule. In Gateway mode, you are the router — the FORWARD chain should already accept. |
-| PATH under `sudo` | `tc` and `nft` are in the Nix store, not `/usr/sbin`. Harbor calls them by name; ensure the shell PATH used under `sudo` includes `/run/current-system/sw/bin` or use `sudo env PATH=$PATH harbor`. |
+| PATH under `sudo` | `tc` and `nft` are in the Nix store, not `/usr/sbin`. harper calls them by name; ensure the shell PATH used under `sudo` includes `/run/current-system/sw/bin` or use `sudo env PATH=$PATH harper`. |
 
 ---
 
@@ -251,7 +251,7 @@ All `tc` and `nftables` state is runtime-only and evaporates on reboot regardles
 
 - `arpwatch`, XArp, and most SIEMs detect duplicate IP-to-MAC associations and gratuitous ARP floods.
 - Managed switches with Dynamic ARP Inspection (DAI) silently drop forged ARP replies at the port level — the MITM position will never be established on such networks.
-- Harbor's poison intervals (`VICTIM_INTERVAL_MS = 4000`, `GATEWAY_INTERVAL_MS = 8000`) with ±20% jitter reduce the ARP storm signature vs. naive 2-second uniform intervals.
+- harper's poison intervals (`VICTIM_INTERVAL_MS = 4000`, `GATEWAY_INTERVAL_MS = 8000`) with ±20% jitter reduce the ARP storm signature vs. naive 2-second uniform intervals.
 
 **Bandwidth limiting as a signal:**
 
@@ -263,7 +263,7 @@ All `tc` and `nftables` state is runtime-only and evaporates on reboot regardles
 
 - Static ARP entries for the gateway completely defeat ARP poisoning.
 - 802.1X / Dynamic ARP Inspection at the switch layer.
-- IPv6: ARP is IPv4-only. Harbor does not implement NDP spoofing. A victim with a working IPv6 path bypasses MITM entirely.
+- IPv6: ARP is IPv4-only. harper does not implement NDP spoofing. A victim with a working IPv6 path bypasses MITM entirely.
 
 ---
 

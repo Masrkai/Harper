@@ -1,8 +1,8 @@
 { lib, rustPlatform, iproute2, nftables, ... }:
 
 rustPlatform.buildRustPackage {
-  pname   = "harbor";
-  version = "0.1.0-dev";
+  pname   = "harper";
+  version = "0.1.0";
 
   src = lib.cleanSource ./.;
 
@@ -18,6 +18,6 @@ rustPlatform.buildRustPackage {
     license     = licenses.mit;
     maintainers = [ "Masrkai" ];
     platforms   = [ "x86_64-linux" "aarch64-linux" ];
-    mainProgram = "Harbor";
+    mainProgram = "harper";
   };
 }

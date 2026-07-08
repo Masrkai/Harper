@@ -73,7 +73,7 @@ mod tests {
     #[test]
     fn test_nonexistent_interface_returns_none() {
         // An interface named with a UUID-like string will never exist.
-        let result = get_cidr("does_not_exist_harbor_test");
+        let result = get_cidr("does_not_exist_harper_test");
         assert!(
             result.is_none(),
             "get_cidr on a nonexistent interface must return None"

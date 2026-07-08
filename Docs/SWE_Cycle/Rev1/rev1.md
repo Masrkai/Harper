@@ -1,4 +1,4 @@
-# Harbor — Implementation Status & Architecture
+# harper — Implementation Status & Architecture
 
 > This document reflects the **current state** of the codebase, not the original roadmap.
 > Deviations from the original plan are noted where relevant.
@@ -31,7 +31,7 @@
 | ARP restoration on teardown | `src/spoofer/poison.rs` → `restore()` | 5× restore packets with 100 ms gap |
 
 > **Deviation:** `rust-fsm` was planned but not used. `HostState` is a plain enum with manual `update_state()` calls — sufficient for the current state space.
-> NAT handling was listed as a goal but is not implemented; Harbor operates on a flat LAN where the gateway does NAT, not Harbor itself.
+> NAT handling was listed as a goal but is not implemented; harper operates on a flat LAN where the gateway does NAT, not harper itself.
 
 ---
 
@@ -41,7 +41,7 @@
 |---|---|---|
 | tc HTB shaping (upload + download) | `src/utils/tc.rs` → `TcManager` | Shells out to `tc` binary; covers init, limit\_host, remove\_host, cleanup |
 | IFB ingress redirect | `TcManager::init()` | One catch-all u32 filter; correct architecture for pre-netfilter ingress |
-| nftables packet marking | `TcManager::nft_*` | `harbor_mangle` table, FORWARD chain rebuilt atomically on every change |
+| nftables packet marking | `TcManager::nft_*` | `harper_mangle` table, FORWARD chain rebuilt atomically on every change |
 | Kernel state management | `src/main.rs` → `KernelState` | ip\_forward=0, rp\_filter=0, send\_redirects=0; restored on exit |
 | NixOS rpfilter gate | `src/main.rs` → `NftGate` | Adds/removes accept rule in `nixos-fw rpfilter-allow` |
 | Gateway mode | `src/gateway_mode.rs` | Shape clients on a network you host — no ARP poisoning, tc only |
@@ -102,7 +102,7 @@ See the UML code in [Rev1 Archetecture](./rev1.puml)
 
 ## Key Safety Properties (Rust vs. Original Python Plan)
 
-| Concern | How Harbor Handles It |
+| Concern | How harper Handles It |
 |---|---|
 | Packet construction bounds | `pnet` fixed `[u8; 42]` buffers — no manual pointer arithmetic, no heap alloc |
 | Concurrent host state | `Arc<RwLock<HostTable>>` — multiple readers, exclusive writer |
@@ -128,9 +128,9 @@ cargo watch -x check
 cargo build --release
 
 # Run (requires root for raw sockets)
-sudo ./target/release/Harbor --help
-sudo ./target/release/Harbor --gateway-mode          # shape a network you host
-sudo ./target/release/Harbor -i eth0 -g 192.168.1.1  # MITM mode
+sudo ./target/release/harper --help
+sudo ./target/release/harper --gateway-mode          # shape a network you host
+sudo ./target/release/harper -i eth0 -g 192.168.1.1  # MITM mode
 ```
 
 ```bash
