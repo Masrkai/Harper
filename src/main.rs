@@ -41,7 +41,7 @@ const COLOR_KEYWORD: Color = Color::from_hex(b"#C792EA");
 // CLI
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Harbor — ARP spoofer / bandwidth limiter
+/// harper — ARP spoofer / bandwidth limiter
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
@@ -102,7 +102,7 @@ impl KernelState {
 
         // IMPORTANT: set ip_forward to 0, NOT 1.
         //
-        // Harbor's PacketForwarder handles all relaying in userspace by
+        // harper's PacketForwarder handles all relaying in userspace by
         // receiving packets addressed to our MAC, rewriting the Ethernet
         // header, and re-sending them.  If we also enable kernel IP
         // forwarding, the kernel forwards every packet a second time,
@@ -550,7 +550,7 @@ let selection = if bypass_mode {
     let mut tc = TcManager::new(&interface_name);
 
     if let Some(kbps) = selection.bandwidth_kbps {
-        match tc.init() {
+        match tc.init().await {
             Err(e) => {
                 logger.error_fmt(format_args!("tc init failed: {e}"));
                 nft_gate.revoke();
@@ -565,7 +565,7 @@ let selection = if bypass_mode {
                 let table = host_table.read().await;
                 for &id in &selection.host_ids {
                     if let Some(entry) = table.get_by_id(id) {
-                        match tc.limit_host(id, entry.host.ip, kbps) {
+                        match tc.limit_host(id, entry.host.ip, kbps).await {
                             Ok(()) => logger.info_fmt(format_args!(
                                 "tc: [{}] {} → {} kbps",
                                 id,
@@ -590,7 +590,7 @@ let selection = if bypass_mode {
         Ok(f) => f,
         Err(e) => {
             logger.error_fmt(format_args!("Could not create packet forwarder: {e}"));
-            tc.cleanup();
+            tc.cleanup().await;
             nft_gate.revoke();
             kernel_state.restore();
             std::process::exit(1);
@@ -716,9 +716,9 @@ let selection = if bypass_mode {
     tokio::time::sleep(restore_wait).await;
     logger.info_fmt(format_args!("ARP caches restoration sent."));
 
-    tc.cleanup();
+    tc.cleanup().await;
     logger.info_fmt(format_args!(
-        "tc qdiscs, harbor_mangle table, and ifb0 removed."
+        "tc qdiscs, harper_mangle table, and ifb0 removed."
     ));
 
     kernel_state.restore();

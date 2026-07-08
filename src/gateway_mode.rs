@@ -176,7 +176,7 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
     // ── tc initialisation ────────────────────────────────────────────────────
     let mut tc = TcManager::new(&interface_name);
 
-    match tc.init() {
+    match tc.init().await {
         Err(e) => {
             logger.error_fmt(format_args!("tc init failed: {e}"));
             std::process::exit(1);
@@ -190,7 +190,7 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
         let table = host_table.read().await;
         for &id in &selection.host_ids {
             if let Some(entry) = table.get_by_id(id) {
-                match tc.limit_host(id, entry.host.ip, kbps) {
+                match tc.limit_host(id, entry.host.ip, kbps).await {
                     Ok(()) => logger.info_fmt(format_args!(
                         "tc: [{}] {} → {} kbps", id,
                         COLOR_WARN.paint(&entry.host.ip.to_string()), kbps,
@@ -229,7 +229,7 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
     // ── Teardown ──────────────────────────────────────────────────────────────
     println!();
     logger.info_fmt(format_args!("Shutting down gateway mode…"));
-    tc.cleanup();
+    tc.cleanup().await;
     logger.info_fmt(format_args!("tc qdiscs removed. Network restored."));
     logger.info_fmt(format_args!("Done."));
 

@@ -60,23 +60,14 @@ pub struct ScanConfig {
 impl ScanConfig {
     /// Wired Ethernet: low latency, reliable delivery, no power-save.
     pub fn ethernet() -> Self {
-        // Self {
-        //     send_interval_ms: 10,
-        //     passes: 2,
-        //     inter_pass_delay_ms: 400,
-        //     post_send_min_ms: 800,
-        //     idle_cutoff_ms: 400,
-        //     hard_timeout_secs: 15,
-        // }
-
         Self {
-            send_interval_ms: 8,        // gentler pacing — AP queue can back up fast
-            passes: 3,                  // extra sweeps for sleeping devices
-            inter_pass_delay_ms: 1_500, // ≥ 1 beacon interval for power-save wakeup
-            post_send_min_ms: 4_000,    // far clients can have 2–3 s RTT
-            idle_cutoff_ms: 2_000,      // wireless is noisy; wait longer for stragglers
+            send_interval_ms: 8,
+            passes: 3,
+            inter_pass_delay_ms: 1_500,
+            post_send_min_ms: 4_000,
+            idle_cutoff_ms: 2_000,
             hard_timeout_secs: 60,
-            pre_wake: true, // targets may be WiFi even if our interface is wired
+            pre_wake: false, // no power-save clients on wired networks
         }
     }
 
@@ -886,7 +877,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn test_scanner_new_nonexistent_interface_returns_err() {
-        let result = ArpScanner::new("does_not_exist_harbor").await;
+        let result = ArpScanner::new("does_not_exist_harper").await;
         assert!(
             result.is_err(),
             "ArpScanner::new on a nonexistent interface must return Err"
