@@ -4,8 +4,10 @@ mod forwarder;
 mod gateway_mode;
 mod host;
 mod network;
+mod scanner;
 mod spoofer;
 mod utils;
+mod infra;
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
@@ -14,7 +16,7 @@ use tokio::sync::RwLock;
 use clap::Parser;
 
 use network::calculator::get_cidr;
-use network::scanner::ArpScanner;
+use scanner::ArpScanner;
 
 use cli::color::Color;
 use cli::selector::InterfaceSelector;
@@ -32,6 +34,8 @@ use utils::gateway::get_gateway;
 use utils::logger::Logger;
 use utils::oui::lookup_vendor;
 use utils::tc::TcManager;
+use infra::components::{KernelState, NftGate};
+use infra::shutdown::ShutdownManager;
 
 const COLOR_OK:      Color = Color::from_hex(b"#50C878");
 const COLOR_WARN:    Color = Color::from_hex(b"#FFB347");
@@ -78,148 +82,7 @@ struct Cli {
     one_sided: bool,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Kernel state (MITM mode only)
-// ─────────────────────────────────────────────────────────────────────────────
 
-struct KernelState {
-    ip_forward: String,
-    send_redirects: String,
-    rp_filter_all: String,
-    interface: String,
-}
-
-impl KernelState {
-    fn enable(interface: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let redirect_path = format!("/proc/sys/net/ipv4/conf/{}/send_redirects", interface);
-
-        let state = Self {
-            ip_forward: read_proc("/proc/sys/net/ipv4/ip_forward"),
-            send_redirects: read_proc(&redirect_path),
-            rp_filter_all: read_proc("/proc/sys/net/ipv4/conf/all/rp_filter"),
-            interface: interface.to_owned(),
-        };
-
-        // IMPORTANT: set ip_forward to 0, NOT 1.
-        //
-        // harper's PacketForwarder handles all relaying in userspace by
-        // receiving packets addressed to our MAC, rewriting the Ethernet
-        // header, and re-sending them.  If we also enable kernel IP
-        // forwarding, the kernel forwards every packet a second time,
-        // creating duplicate packets.  Those duplicates cause TCP to see
-        // out-of-order segments, trigger spurious retransmits, and make
-        // connections stall until one forwarding path "wins" — which is the
-        // unstable behaviour seen before this fix.
-        //
-        // With ip_forward=0 only our userspace forwarder relays traffic.
-        // The kernel still processes packets addressed directly to our IP
-        // (e.g. SSH into this machine) — that path is unaffected by
-        // ip_forward.  Only transit traffic (victim ↔ gateway) is affected,
-        // and that is exactly what PacketForwarder handles.
-        std::fs::write("/proc/sys/net/ipv4/ip_forward", "0\n")?;
-
-        let _ = std::fs::write(&redirect_path, "0\n");
-        let _ = std::fs::write("/proc/sys/net/ipv4/conf/all/send_redirects", "0\n");
-
-        // rp_filter must still be 0 — reverse-path filtering would drop
-        // forwarded packets whose source IP is on the same interface they
-        // arrived on (which is always the case in a same-segment MITM).
-        std::fs::write("/proc/sys/net/ipv4/conf/all/rp_filter", "0\n")?;
-        let _ = std::fs::write(
-            &format!("/proc/sys/net/ipv4/conf/{}/rp_filter", interface),
-            "0\n",
-        );
-
-        Ok(state)
-    }
-
-    fn restore(&self) {
-        let redirect_path = format!("/proc/sys/net/ipv4/conf/{}/send_redirects", self.interface);
-        let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", &self.ip_forward);
-        let _ = std::fs::write(&redirect_path, &self.send_redirects);
-        let _ = std::fs::write("/proc/sys/net/ipv4/conf/all/send_redirects", "1\n");
-        let _ = std::fs::write("/proc/sys/net/ipv4/conf/all/rp_filter", &self.rp_filter_all);
-        let _ = std::fs::write(
-            &format!("/proc/sys/net/ipv4/conf/{}/rp_filter", self.interface),
-            &self.rp_filter_all,
-        );
-    }
-}
-
-fn read_proc(path: &str) -> String {
-    std::fs::read_to_string(path).unwrap_or_else(|_| "0\n".to_string())
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// NixOS rpfilter gate (MITM mode only)
-// ─────────────────────────────────────────────────────────────────────────────
-
-struct NftGate {
-    rpfilter_handle: Option<u64>,
-}
-
-impl NftGate {
-    fn install(interface: &str) -> Self {
-        let rule = format!(
-            "add rule inet nixos-fw rpfilter-allow iifname \"{iface}\" accept",
-            iface = interface,
-        );
-
-        let ok = std::process::Command::new("nft")
-            .args(rule.split_whitespace())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-
-        if !ok {
-            println!("[!] nft: could not add rpfilter-allow rule (may be harmless)");
-            return Self {
-                rpfilter_handle: None,
-            };
-        }
-
-        let handle = last_rule_handle("inet", "nixos-fw", "rpfilter-allow");
-        if let Some(h) = handle {
-            println!("[+] nft: rpfilter-allow rule added (handle {}).", h);
-        }
-
-        Self {
-            rpfilter_handle: handle,
-        }
-    }
-
-    fn revoke(&self) {
-        if let Some(handle) = self.rpfilter_handle {
-            let _ = std::process::Command::new("nft")
-                .args([
-                    "delete",
-                    "rule",
-                    "inet",
-                    "nixos-fw",
-                    "rpfilter-allow",
-                    "handle",
-                    &handle.to_string(),
-                ])
-                .output();
-            println!("[+] nft: rpfilter-allow rule revoked.");
-        }
-    }
-}
-
-fn last_rule_handle(family: &str, table: &str, chain: &str) -> Option<u64> {
-    let out = std::process::Command::new("nft")
-        .args(["-a", "list", "chain", family, table, chain])
-        .output()
-        .ok()?;
-
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .rev()
-        .find_map(|line| {
-            line.rfind("# handle ")
-                .and_then(|pos| line[pos + 9..].trim().parse::<u64>().ok())
-        })
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Target expansion (MITM mode only)
@@ -533,6 +396,8 @@ let selection = if bypass_mode {
     // Infrastructure setup
     // ─────────────────────────────────────────────────────────────────────────
 
+    let mut shutdown_manager = ShutdownManager::new();
+
     let kernel_state = match KernelState::enable(&interface_name) {
         Ok(s) => s,
         Err(e) => {
@@ -543,18 +408,20 @@ let selection = if bypass_mode {
     logger.info_fmt(format_args!(
         "Kernel: ip_forward=0 (userspace forwarder only), rp_filter=0, send_redirects=0."
     ));
+    shutdown_manager.add(Box::new(kernel_state));
 
     let nft_gate = NftGate::install(&interface_name);
+    shutdown_manager.add(Box::new(nft_gate));
 
     // ── tc bandwidth shaping ─────────────────────────────────────────────────
     let mut tc = TcManager::new(&interface_name);
+    // (Assuming tc will be added after init, but I can add it now if I can make it mutable or change how add works. Wait, I added TcManager to Cleanupable, I need to make sure I add it to ShutdownManager. I should add it *after* initialization?)
 
     if let Some(kbps) = selection.bandwidth_kbps {
         match tc.init().await {
             Err(e) => {
                 logger.error_fmt(format_args!("tc init failed: {e}"));
-                nft_gate.revoke();
-                kernel_state.restore();
+                shutdown_manager.shutdown().await;
                 std::process::exit(1);
             }
             Ok(()) => {
@@ -562,6 +429,7 @@ let selection = if bypass_mode {
                     "tc: HTB + IFB shaping initialised on {}.",
                     interface_name
                 ));
+
                 let table = host_table.read().await;
                 for &id in &selection.host_ids {
                     if let Some(entry) = table.get_by_id(id) {
@@ -591,8 +459,7 @@ let selection = if bypass_mode {
         Err(e) => {
             logger.error_fmt(format_args!("Could not create packet forwarder: {e}"));
             tc.cleanup().await;
-            nft_gate.revoke();
-            kernel_state.restore();
+            shutdown_manager.shutdown().await;
             std::process::exit(1);
         }
     };
@@ -716,15 +583,8 @@ let selection = if bypass_mode {
     tokio::time::sleep(restore_wait).await;
     logger.info_fmt(format_args!("ARP caches restoration sent."));
 
-    tc.cleanup().await;
-    logger.info_fmt(format_args!(
-        "tc qdiscs, harper_mangle table, and ifb0 removed."
-    ));
-
-    kernel_state.restore();
-    logger.info_fmt(format_args!("Kernel state restored."));
-
-    nft_gate.revoke();
+    shutdown_manager.add(Box::new(tc));
+    shutdown_manager.shutdown().await;
 
     logger.info_fmt(format_args!("Done."));
     Ok(())

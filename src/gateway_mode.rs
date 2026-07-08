@@ -15,7 +15,7 @@ use crate::cli::target_selector::{SelectionResult, TargetSelector};
 use crate::host::table::HostTable;
 use crate::network::IpRange;
 use crate::network::calculator::get_cidr;
-use crate::network::scanner::ArpScanner;
+use crate::scanner::ArpScanner;
 use crate::utils::ip_range::expand_targets;
 use crate::utils::logger::Logger;
 use crate::utils::oui::lookup_vendor;

@@ -71,6 +71,17 @@ use std::process::Stdio;
 use tokio::process::Command;
 
 use crate::host::table::HostId;
+use crate::infra::Cleanupable;
+
+impl Cleanupable for TcManager {
+    fn cleanup(&mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Box<dyn std::error::Error>>> + Send + '_>> {
+        let tc = self;
+        Box::pin(async move {
+            tc.cleanup().await;
+            Ok(())
+        })
+    }
+}
 
 const IFB_DEV: &str = "ifb0";
 const LINE_RATE: &str = "1000mbit";
