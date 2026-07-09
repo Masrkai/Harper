@@ -106,3 +106,33 @@ impl std::fmt::Display for NetworkError {
 }
 
 impl std::error::Error for NetworkError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ip_range_from_cidr_valid() {
+        let range = IpRange::from_cidr("192.168.1.0/24").unwrap();
+        assert_eq!(range.network, Ipv4Addr::new(192, 168, 1, 0));
+        assert_eq!(range.prefix_len, 24);
+        assert_eq!(range.start, Ipv4Addr::new(192, 168, 1, 1));
+        assert_eq!(range.end, Ipv4Addr::new(192, 168, 1, 254));
+    }
+
+    #[test]
+    fn test_ip_range_from_cidr_invalid() {
+        assert!(IpRange::from_cidr("192.168.1.0").is_err());
+        assert!(IpRange::from_cidr("192.168.1.0/32").is_err()); // prefix too large
+    }
+
+    #[test]
+    fn test_ip_range_contains() {
+        let range = IpRange::from_cidr("192.168.1.0/24").unwrap();
+        assert!(range.contains(Ipv4Addr::new(192, 168, 1, 1)));
+        assert!(range.contains(Ipv4Addr::new(192, 168, 1, 254)));
+        assert!(!range.contains(Ipv4Addr::new(192, 168, 0, 255)));
+        assert!(!range.contains(Ipv4Addr::new(192, 168, 2, 1)));
+    }
+}
+
