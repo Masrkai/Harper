@@ -18,7 +18,7 @@ use clap::Parser;
 use network::calculator::get_cidr;
 use scanner::ArpScanner;
 
-use cli::color::Color;
+use cli::color::palette;
 use cli::selector::InterfaceSelector;
 use cli::target_selector::TargetSelector;
 
@@ -38,10 +38,6 @@ use utils::oui::lookup_vendor;
 use utils::tc::TcManager;
 use infra::components::{KernelState, NftGate};
 use infra::shutdown::ShutdownManager;
-
-const COLOR_OK:      Color = Color::from_hex(b"#50C878");
-const COLOR_WARN:    Color = Color::from_hex(b"#FFB347");
-const COLOR_KEYWORD: Color = Color::from_hex(b"#C792EA");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CLI
@@ -132,7 +128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(name) => {
             logger.info_fmt(format_args!(
                 "Interface (from args): {}",
-                COLOR_KEYWORD.paint(&name)
+                palette::KEYWORD.paint(&name)
             ));
             name
         }
@@ -150,7 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(ip) => {
             logger.info_fmt(format_args!(
                 "Gateway (from args): {}",
-                COLOR_OK.paint(&ip.to_string())
+                palette::OK.paint(&ip.to_string())
             ));
             ip
         }
@@ -158,7 +154,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(ip) => {
                 logger.info_fmt(format_args!(
                     "Default gateway: {}",
-                    COLOR_OK.paint(&ip.to_string())
+                    palette::OK.paint(&ip.to_string())
                 ));
                 ip
             }
@@ -175,13 +171,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Scanner ──────────────────────────────────────────────────────────────
     logger.info_fmt(format_args!(
         "Initialising on interface: {}",
-        COLOR_KEYWORD.paint(&interface_name)
+        palette::KEYWORD.paint(&interface_name)
     ));
     let scanner = ArpScanner::new(&interface_name).await?;
     logger.info_fmt(format_args!(
         "Local MAC: {}  Local IP: {}",
-        COLOR_KEYWORD.paint(&scanner.local_mac().to_string()),
-        COLOR_KEYWORD.paint(&scanner.local_ip().to_string()),
+        palette::KEYWORD.paint(&scanner.local_mac().to_string()),
+        palette::KEYWORD.paint(&scanner.local_ip().to_string()),
     ));
 
     // ── Host discovery ───────────────────────────────────────────────────────
@@ -192,7 +188,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(v) => {
                     logger.info_fmt(format_args!(
                         "Target '{}' → {} IP(s)",
-                        COLOR_KEYWORD.paint(raw),
+                        palette::KEYWORD.paint(raw),
                         v.len()
                     ));
                     ips.extend(v);
@@ -213,14 +209,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         logger.info_fmt(format_args!(
             "Starting ARP scan on: {}",
-            COLOR_KEYWORD.paint(&interface_name)
+            palette::KEYWORD.paint(&interface_name)
         ));
         let cidr = get_cidr(&interface_name).ok_or("could not determine CIDR")?;
         let range = network::IpRange::from_cidr(&cidr)?;
         logger.info_fmt(format_args!(
             "Scanning {} → {}",
-            COLOR_KEYWORD.paint(&range.start.to_string()),
-            COLOR_KEYWORD.paint(&range.end.to_string()),
+            palette::KEYWORD.paint(&range.start.to_string()),
+            palette::KEYWORD.paint(&range.end.to_string()),
         ));
         logger.info_fmt(format_args!("Passive ARP sniff (10 s)…"));
         let passive = scanner
@@ -272,8 +268,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     logger.info_fmt(format_args!(
         "Gateway: {}  MAC: {}",
-        COLOR_OK.paint(&gateway_ip.to_string()),
-        COLOR_OK.paint(&gateway_mac.to_string()),
+        palette::OK.paint(&gateway_ip.to_string()),
+        palette::OK.paint(&gateway_mac.to_string()),
     ));
 
     // ── Target selection ─────────────────────────────────────────────────────
@@ -295,7 +291,7 @@ fn resolve_bandwidth(
             print!(
                 "{}",
                 crate::paint!(
-                    &COLOR_KEYWORD,
+                    &palette::KEYWORD,
                     "Bandwidth cap in kbps per host (leave blank = unlimited): "
                 )
             );
@@ -403,7 +399,7 @@ let selection = if bypass_mode {
                             Ok(()) => logger.info_fmt(format_args!(
                                 "tc: [{}] {} → {} kbps",
                                 id,
-                                COLOR_WARN.paint(&entry.host.ip.to_string()),
+                                palette::WARN.paint(&entry.host.ip.to_string()),
                                 kbps,
                             )),
                             Err(e) => logger.error_fmt(format_args!(
@@ -452,7 +448,7 @@ let selection = if bypass_mode {
                     logger.info_fmt(format_args!(
                         "Forwarding enabled for [{}] {}",
                         id,
-                        COLOR_WARN.paint(&entry.host.ip.to_string()),
+                        palette::WARN.paint(&entry.host.ip.to_string()),
                     ));
                 }
             }
@@ -477,7 +473,7 @@ let selection = if bypass_mode {
                     logger.info_fmt(format_args!(
                         "Poisoning [{}] {} ({})",
                         id,
-                        COLOR_WARN.paint(&entry.host.ip.to_string()),
+                        palette::WARN.paint(&entry.host.ip.to_string()),
                         entry.host.mac,
                     ));
                 }
@@ -488,7 +484,7 @@ let selection = if bypass_mode {
     println!();
     logger.info_fmt(format_args!(
         "{}",
-        COLOR_OK.paint("Poisoning active. Press Ctrl-C or 'q' + Enter to stop and restore.")
+        palette::OK.paint("Poisoning active. Press Ctrl-C or 'q' + Enter to stop and restore.")
     ));
 
     // ─────────────────────────────────────────────────────────────────────────

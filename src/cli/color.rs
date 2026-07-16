@@ -49,6 +49,26 @@ macro_rules! paint {
     };
 }
 
+/// Canonical colour palette. All UI/log colours are defined here once so
+/// modules import `cli::color::palette::*` instead of redeclaring constants.
+/// Semantic aliases that share a hex (e.g. `OK`/`INFO`, `KEYWORD`/`PROMPT`)
+/// are kept for readability at call sites — they cost nothing (`const`).
+pub mod palette {
+    use super::Color;
+
+    pub const OK:      Color = Color::from_hex(b"#50C878");
+    pub const WARN:    Color = Color::from_hex(b"#FFB347");
+    pub const KEYWORD: Color = Color::from_hex(b"#C792EA");
+    pub const PROMPT:  Color = Color::from_hex(b"#C792EA");
+    pub const MESSAGE: Color = Color::from_hex(b"#C792EA");
+    pub const DIM:     Color = Color::from_hex(b"#888888");
+
+    pub const INFO:    Color = Color::from_hex(b"#50C878");
+    pub const DEBUG:   Color = Color::from_hex(b"#508CFF");
+    pub const ERROR:   Color = Color::from_hex(b"#FF5050");
+    pub const FATAL:   Color = Color::from_hex(b"#8B0000");
+}
+
 // ── Compile-time assertions ───────────────────────────────────────────────────
 
 const _: () = {

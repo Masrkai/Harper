@@ -1,10 +1,5 @@
 use crate::cli::color::*;
 
-const COLOR_INFO: Color = Color::from_hex(b"#50C878");
-const COLOR_DEBUG: Color = Color::from_hex(b"#508CFF");
-const COLOR_ERROR: Color = Color::from_hex(b"#FF5050");
-const COLOR_FATAL: Color = Color::from_hex(b"#8B0000");
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum LogState {
     Info,
@@ -17,10 +12,10 @@ impl LogState {
     /// Colored label — pulls directly from the constants at the top of the file.
     pub fn label(&self) -> String {
         match self {
-            LogState::Info => COLOR_INFO.paint("[INFO ]"),
-            LogState::Debug => COLOR_DEBUG.paint("[DEBUG]"),
-            LogState::Error => COLOR_ERROR.paint("[ERROR]"),
-            LogState::Fatal => COLOR_FATAL.paint("[FATAL]"),
+            LogState::Info => palette::INFO.paint("[INFO ]"),
+            LogState::Debug => palette::DEBUG.paint("[DEBUG]"),
+            LogState::Error => palette::ERROR.paint("[ERROR]"),
+            LogState::Fatal => palette::FATAL.paint("[FATAL]"),
         }
     }
 

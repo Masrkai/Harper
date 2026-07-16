@@ -7,8 +7,6 @@ use crate::utils::logger::*;
 
 use std::io::{self, Write};
 
-const COLOR_MESSAGE: Color = Color::from_hex(b"#C792EA");
-
 pub struct InterfaceSelector;
 
 impl InterfaceSelector {
@@ -50,7 +48,7 @@ impl InterfaceSelector {
         print!(
             "{}",
             paint!(
-                &COLOR_MESSAGE,
+                &palette::MESSAGE,
                 "Select interface [1-{}] (or 'q' to quit): ",
                 interfaces.len()
             )

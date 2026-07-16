@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::cli::color::Color;
+use crate::cli::color::palette;
 use crate::cli::selector::InterfaceSelector;
 use crate::cli::target_selector::{SelectionResult, TargetSelector};
 use crate::host::table::HostTable;
@@ -21,10 +21,6 @@ use crate::utils::logger::Logger;
 use crate::utils::oui::lookup_vendor;
 use crate::utils::shutdown::spawn_shutdown_listener;
 use crate::utils::tc::TcManager;
-
-const COLOR_OK:      Color = Color::from_hex(b"#50C878");
-const COLOR_WARN:    Color = Color::from_hex(b"#FFB347");
-const COLOR_KEYWORD: Color = Color::from_hex(b"#C792EA");
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -40,14 +36,14 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
     let mut logger = Logger::new();
 
     logger.info_fmt(format_args!(
-        "{}", COLOR_OK.paint("Gateway mode — shaping clients on a network you host")
+        "{}", palette::OK.paint("Gateway mode — shaping clients on a network you host")
     ));
     logger.info_fmt(format_args!("No ARP poisoning. Kernel routing handles forwarding."));
 
     // ── Interface selection ──────────────────────────────────────────────────
     let interface_name = match cfg.interface {
         Some(ref name) => {
-            logger.info_fmt(format_args!("Interface (from args): {}", COLOR_KEYWORD.paint(name)));
+            logger.info_fmt(format_args!("Interface (from args): {}", palette::KEYWORD.paint(name)));
             name.clone()
         }
         None => match InterfaceSelector::select(true) {
@@ -64,8 +60,8 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
     let our_ip = scanner.local_ip();
     logger.info_fmt(format_args!(
         "Local MAC: {}  Local IP: {}",
-        COLOR_KEYWORD.paint(&scanner.local_mac().to_string()),
-        COLOR_KEYWORD.paint(&our_ip.to_string()),
+        palette::KEYWORD.paint(&scanner.local_mac().to_string()),
+        palette::KEYWORD.paint(&our_ip.to_string()),
     ));
 
     // ── Host discovery ───────────────────────────────────────────────────────
@@ -98,8 +94,8 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
             let range = IpRange::from_cidr(&cidr)?;
             logger.info_fmt(format_args!(
                 "ARP cache empty — scanning {} → {}",
-                COLOR_KEYWORD.paint(&range.start.to_string()),
-                COLOR_KEYWORD.paint(&range.end.to_string()),
+                palette::KEYWORD.paint(&range.start.to_string()),
+                palette::KEYWORD.paint(&range.end.to_string()),
             ));
 
             logger.info_fmt(format_args!("Passive ARP sniff (5 s)…"));
@@ -208,7 +204,7 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
                 match tc.limit_host(id, entry.host.ip, kbps).await {
                     Ok(()) => logger.info_fmt(format_args!(
                         "tc: [{}] {} → {} kbps", id,
-                        COLOR_WARN.paint(&entry.host.ip.to_string()), kbps,
+                        palette::WARN.paint(&entry.host.ip.to_string()), kbps,
                     )),
                     Err(e) => logger.error_fmt(format_args!(
                         "tc limit_host [{}] {}: {e}", id, entry.host.ip,
@@ -235,7 +231,7 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
             selection.host_ids.len(),
         )
     };
-    logger.info_fmt(format_args!("{}", COLOR_OK.paint(&status_msg)));
+    logger.info_fmt(format_args!("{}", palette::OK.paint(&status_msg)));
 
     // Spawned HERE — after ALL stdin interaction is complete.
     let shutdown_rx = spawn_shutdown_listener();

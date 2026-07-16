@@ -12,16 +12,11 @@
 //
 // The gateway is automatically excluded regardless of input.
 
-use crate::cli::color::Color;
+use crate::cli::color::palette;
 use crate::host::table::{HostId, HostTable};
 use crate::paint;
 use std::io::{self, Write};
 use std::net::Ipv4Addr;
-
-const COLOR_PROMPT: Color = Color::from_hex(b"#C792EA");
-const COLOR_WARN: Color = Color::from_hex(b"#FFB347");
-const COLOR_OK: Color = Color::from_hex(b"#50C878");
-const COLOR_DIM: Color = Color::from_hex(b"#888888");
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -86,7 +81,7 @@ impl TargetSelector {
                 println!(
                     "{}",
                     paint!(
-                        &COLOR_WARN,
+                        &palette::WARN,
                         "  Gateway [{}] {} is excluded from selection.",
                         gw_id,
                         gw.host.ip
@@ -97,13 +92,13 @@ impl TargetSelector {
 
         println!(
             "\n{}",
-            paint!(&COLOR_DIM, r#"  Formats:  "3"   "1-5"   "1,3,5"   "all""#)
+            paint!(&palette::DIM, r#"  Formats:  "3"   "1-5"   "1,3,5"   "all""#)
         );
 
         print!(
             "\n{}",
             paint!(
-                &COLOR_PROMPT,
+                &palette::PROMPT,
                 "Select target(s) [1-{}] or 'q' to quit: ",
                 available.iter().copied().max().unwrap_or(0)
             )
@@ -124,7 +119,7 @@ impl TargetSelector {
 
         println!(
             "\n{}",
-            paint!(&COLOR_OK, "  {} host(s) selected:", host_ids.len())
+            paint!(&palette::OK, "  {} host(s) selected:", host_ids.len())
         );
         for id in &host_ids {
             if let Some(entry) = table.get_by_id(*id) {
@@ -226,7 +221,7 @@ impl TargetSelector {
         print!(
             "\n{}",
             paint!(
-                &COLOR_PROMPT,
+                &palette::PROMPT,
                 "Bandwidth cap in kbps per host (leave blank = unlimited): "
             )
         );
@@ -236,9 +231,9 @@ impl TargetSelector {
         match result {
             Some(kbps) => println!(
                 "{}",
-                paint!(&COLOR_OK, "  Bandwidth limit: {} kbps per host", kbps)
+                paint!(&palette::OK, "  Bandwidth limit: {} kbps per host", kbps)
             ),
-            None => println!("{}", paint!(&COLOR_DIM, "  No bandwidth limit.")),
+            None => println!("{}", paint!(&palette::DIM, "  No bandwidth limit.")),
         }
         result
     }
