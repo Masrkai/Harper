@@ -19,5 +19,4 @@ pub enum ForwarderCommand {
     Enable(ForwardRule),
     Disable(HostId),
     DisableAll,
-    UpdateRateLimit(HostId, Option<u64>), // kbps, None = unlimited
 }

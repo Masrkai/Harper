@@ -1,5 +1,5 @@
 // src/spoofer/engine.rs
-use super::{SpoofState, SpoofStatus, SpoofTarget, SpooferCommand, poison::PoisonLoop};
+use super::{SpoofTarget, SpooferCommand, poison::PoisonLoop};
 use crate::host::table::{HostState, HostTable};
 use pnet::util::MacAddr;
 use std::collections::HashMap;
@@ -24,7 +24,6 @@ pub struct SpooferEngine {
 struct PoisonHandle {
     stop_tx: oneshot::Sender<()>,
     task: JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
-    status: Arc<tokio::sync::Mutex<SpoofStatus>>,
 }
 
 impl SpooferEngine {
@@ -69,9 +68,6 @@ impl SpooferEngine {
                     self.stop_all().await;
                     break;
                 }
-                SpooferCommand::UpdateGatewayMac(new_mac) => {
-                    self.update_gateway_mac(new_mac).await;
-                }
             }
         }
 
@@ -98,14 +94,6 @@ impl SpooferEngine {
 
         let (stop_tx, stop_rx) = oneshot::channel();
 
-        let status = Arc::new(tokio::sync::Mutex::new(SpoofStatus {
-            host_id,
-            state: SpoofState::Poisoning,
-            poison_count: 0,
-            last_poison: None,
-            error_count: 0,
-        }));
-
         // Each PoisonLoop gets its own dedicated socket — no shared mutex.
         let poison_loop = PoisonLoop::new(
             self.interface_name.clone(),
@@ -115,7 +103,7 @@ impl SpooferEngine {
 
         let task = tokio::spawn(async move { poison_loop.run(target, stop_rx).await });
 
-        self.active_loops.insert(host_id, PoisonHandle { stop_tx, task, status });
+        self.active_loops.insert(host_id, PoisonHandle { stop_tx, task });
         println!("[+] Poison loop started for host {} (dedicated socket)", host_id);
     }
 
@@ -151,31 +139,5 @@ impl SpooferEngine {
         for id in host_ids {
             self.stop_poison(id).await;
         }
-    }
-
-    async fn update_gateway_mac(&mut self, new_mac: MacAddr) {
-        println!("[*] Updating gateway MAC to {}", new_mac);
-        // New loops will pick up the correct MAC automatically.
-        // In-flight loops are unaffected — they pre-built their packets
-        // with the MAC at poison-start time. A full restart (StopAll +
-        // re-issue Start commands) is needed for a mid-session gateway MAC
-        // change, which is already the documented behaviour.
-    }
-
-    pub fn is_poisoning(&self, host_id: crate::host::table::HostId) -> bool {
-        self.active_loops.contains_key(&host_id)
-    }
-
-    pub async fn get_status(
-        &self,
-        host_id: crate::host::table::HostId,
-    ) -> Option<SpoofStatus> {
-        self.active_loops.get(&host_id).map(|_| SpoofStatus {
-            host_id,
-            state: SpoofState::Poisoning,
-            poison_count: 0,
-            last_poison: None,
-            error_count: 0,
-        })
     }
 }

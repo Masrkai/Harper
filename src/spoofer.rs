@@ -42,22 +42,4 @@ pub enum SpooferCommand {
     Start(SpoofTarget),
     Stop(HostId),
     StopAll,
-    UpdateGatewayMac(MacAddr),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SpoofState {
-    Idle,
-    Poisoning,
-    Recovering, // Sending legitimate ARP to restore caches
-    Failed,
-}
-
-#[derive(Debug)]
-pub struct SpoofStatus {
-    pub host_id: HostId,
-    pub state: SpoofState,
-    pub poison_count: u64,
-    pub last_poison: Option<std::time::Instant>,
-    pub error_count: u32,
 }

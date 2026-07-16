@@ -16,8 +16,12 @@ pub enum InterfaceKind {
 }
 
 impl InterfaceKind {
-    fn from_name(name: &str) -> Self {
-        if name.starts_with("wlan") || name.starts_with("wlp") || name.starts_with("wlo") {
+    pub fn from_name(name: &str) -> Self {
+        if name.starts_with("wlan")
+            || name.starts_with("wlp")
+            || name.starts_with("wlo")
+            || name.starts_with("wl")
+        {
             Self::Wireless
         } else if name.starts_with("eth")
             || name.starts_with("enp")

@@ -3,9 +3,9 @@ use std::process::Command;
 use crate::infra::Cleanupable;
 
 pub struct KernelState {
-    pub ip_forward: String,
-    pub send_redirects: String,
-    pub rp_filter_all: String,
+    pub ip_forward: Option<String>,
+    pub send_redirects: Option<String>,
+    pub rp_filter_all: Option<String>,
     pub interface: String,
 }
 
@@ -36,14 +36,28 @@ impl KernelState {
 
     pub fn restore(&self) {
         let redirect_path = format!("/proc/sys/net/ipv4/conf/{}/send_redirects", self.interface);
-        let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", &self.ip_forward);
-        let _ = std::fs::write(&redirect_path, &self.send_redirects);
-        let _ = std::fs::write("/proc/sys/net/ipv4/conf/all/send_redirects", "1\n");
-        let _ = std::fs::write("/proc/sys/net/ipv4/conf/all/rp_filter", &self.rp_filter_all);
-        let _ = std::fs::write(
+        restore_sysctl("/proc/sys/net/ipv4/ip_forward", self.ip_forward.as_deref());
+        restore_sysctl(&redirect_path, self.send_redirects.as_deref());
+        restore_sysctl("/proc/sys/net/ipv4/conf/all/send_redirects", Some("1\n"));
+        restore_sysctl("/proc/sys/net/ipv4/conf/all/rp_filter", self.rp_filter_all.as_deref());
+        restore_sysctl(
             &format!("/proc/sys/net/ipv4/conf/{}/rp_filter", self.interface),
-            &self.rp_filter_all,
+            self.rp_filter_all.as_deref(),
         );
+    }
+}
+
+/// Writes a sysctl value, surfacing failures instead of silently ignoring them.
+/// A failed restore (e.g. of ip_forward) could leave the host in an unsafe
+/// state, so the operator must be told. A `None` value (original unreadable)
+/// is left untouched rather than written.
+fn restore_sysctl(path: &str, value: Option<&str>) {
+    let Some(value) = value else {
+        eprintln!("[!] Skipping restore of sysctl {path}: original value was unreadable");
+        return;
+    };
+    if let Err(e) = std::fs::write(path, value) {
+        eprintln!("[!] Failed to restore sysctl {path}: {e}");
     }
 }
 

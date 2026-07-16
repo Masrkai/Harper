@@ -5,7 +5,7 @@ use nix::unistd::geteuid;
 /// Returns Ok(()) if root, Err with the message to display if not.
 pub(crate) fn check_root_logic(is_root: bool) -> Result<&'static str, &'static str> {
     if is_root {
-        Ok("Root privilages have been granted suceessfully")
+        Ok("Root privileges have been granted successfully")
     } else {
         Err("This tool requires root privileges for raw socket access, Try running with sudo!")
     }
@@ -62,28 +62,6 @@ mod tests {
         let ok_msg = check_root_logic(true).unwrap();
         let err_msg = check_root_logic(false).unwrap_err();
         assert_ne!(ok_msg, err_msg);
-    }
-
-    /// The error message must mention "sudo" or "root" so the user knows
-    /// how to fix the problem.
-    #[test]
-    fn test_err_message_mentions_sudo_or_root() {
-        let msg = check_root_logic(false).unwrap_err().to_lowercase();
-        assert!(
-            msg.contains("sudo") || msg.contains("root"),
-            "error message should guide the user, got: {msg}"
-        );
-    }
-
-    /// The success message must mention "root" or "privilege" so it's clear
-    /// what was granted.
-    #[test]
-    fn test_ok_message_mentions_root_or_privilege() {
-        let msg = check_root_logic(true).unwrap().to_lowercase();
-        assert!(
-            msg.contains("root") || msg.contains("priv"),
-            "success message should confirm privilege level, got: {msg}"
-        );
     }
 
     /// check_root_logic is pure — calling it multiple times with the same

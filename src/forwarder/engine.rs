@@ -147,9 +147,6 @@ impl PacketForwarder {
                     stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                     break;
                 }
-                ForwarderCommand::UpdateRateLimit(host_id, rate) => {
-                    self.update_rate_limit(host_id, rate).await;
-                }
             }
         }
 
@@ -371,16 +368,6 @@ impl PacketForwarder {
     async fn disable_all(&mut self) {
         self.active_rules.lock().await.clear();
         println!("[+] All forwarding disabled");
-    }
-
-    async fn update_rate_limit(&mut self, host_id: crate::host::table::HostId, rate: Option<u64>) {
-        if self.active_rules.lock().await.contains_key(&host_id) {
-            if let Some(kbps) = rate {
-                println!("[*] Rate limit for host {}: {} kbps", host_id, kbps);
-            } else {
-                println!("[*] Rate limit removed for host {}", host_id);
-            }
-        }
     }
 }
 

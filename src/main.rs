@@ -31,7 +31,9 @@ use spoofer::{SpoofTarget, SpooferCommand, SpooferEngine};
 
 use utils::check_root::check_root;
 use utils::gateway::get_gateway;
+use utils::ip_range::expand_one;
 use utils::logger::Logger;
+use utils::shutdown::spawn_shutdown_listener;
 use utils::oui::lookup_vendor;
 use utils::tc::TcManager;
 use infra::components::{KernelState, NftGate};
@@ -83,41 +85,6 @@ struct Cli {
 }
 
 
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Target expansion (MITM mode only)
-// ─────────────────────────────────────────────────────────────────────────────
-
-fn expand_target(s: &str) -> Result<Vec<Ipv4Addr>, String> {
-    if s.contains('/') {
-        let range =
-            network::IpRange::from_cidr(s).map_err(|e| format!("invalid CIDR '{s}': {e}"))?;
-        return Ok(range.iter().collect());
-    }
-    if let Some((prefix, range_part)) = s.rsplit_once('.') {
-        if let Some((lo_s, hi_s)) = range_part.split_once('-') {
-            let octs = format!("{prefix}.0")
-                .parse::<Ipv4Addr>()
-                .map_err(|_| format!("invalid prefix '{prefix}'"))?
-                .octets();
-            let lo: u8 = lo_s
-                .parse()
-                .map_err(|_| format!("bad range start in '{s}'"))?;
-            let hi: u8 = hi_s
-                .parse()
-                .map_err(|_| format!("bad range end in '{s}'"))?;
-            if lo > hi {
-                return Err(format!("range start > end in '{s}'"));
-            }
-            return Ok((lo..=hi)
-                .map(|n| Ipv4Addr::new(octs[0], octs[1], octs[2], n))
-                .collect());
-        }
-    }
-    s.parse::<Ipv4Addr>()
-        .map(|ip| vec![ip])
-        .map_err(|_| format!("cannot parse '{s}' as IP, CIDR, or range"))
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Main
@@ -221,7 +188,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (discovered, bypass_mode) = if !cli.targets.is_empty() {
         let mut ips: Vec<Ipv4Addr> = Vec::new();
         for raw in &cli.targets {
-            match expand_target(raw) {
+            match expand_one(raw) {
                 Ok(v) => {
                     logger.info_fmt(format_args!(
                         "Target '{}' → {} IP(s)",
@@ -415,7 +382,6 @@ let selection = if bypass_mode {
 
     // ── tc bandwidth shaping ─────────────────────────────────────────────────
     let mut tc = TcManager::new(&interface_name);
-    // (Assuming tc will be added after init, but I can add it now if I can make it mutable or change how add works. Wait, I added TcManager to Cleanupable, I need to make sure I add it to ShutdownManager. I should add it *after* initialization?)
 
     if let Some(kbps) = selection.bandwidth_kbps {
         match tc.init().await {
@@ -528,43 +494,7 @@ let selection = if bypass_mode {
     // ─────────────────────────────────────────────────────────────────────────
     // Wait for shutdown signal
     // ─────────────────────────────────────────────────────────────────────────
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let shutdown_tx = Arc::new(std::sync::Mutex::new(Some(shutdown_tx)));
-
-    {
-        let tx = Arc::clone(&shutdown_tx);
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            rt.block_on(tokio::signal::ctrl_c()).ok();
-            if let Some(sender) = tx.lock().unwrap().take() {
-                let _ = sender.send(());
-            }
-        });
-    }
-
-    {
-        let tx = Arc::clone(&shutdown_tx);
-        std::thread::spawn(move || {
-            use std::io::BufRead;
-            let stdin = std::io::stdin();
-            for line in stdin.lock().lines() {
-                match line {
-                    Ok(l) if l.trim().eq_ignore_ascii_case("q") => {
-                        println!();
-                        if let Some(sender) = tx.lock().unwrap().take() {
-                            let _ = sender.send(());
-                        }
-                        break;
-                    }
-                    Ok(_) => {}
-                    Err(_) => break,
-                }
-            }
-        });
-    }
+    let mut shutdown_rx = spawn_shutdown_listener();
 
     let _ = shutdown_rx.await;
 

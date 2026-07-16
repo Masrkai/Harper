@@ -286,10 +286,6 @@ impl TcManager {
         errors
     }
 
-    pub async fn limit_all(&mut self, entries: &[(HostId, Ipv4Addr)], kbps: u64) -> Vec<TcError> {
-        self.limit_range(entries, kbps).await
-    }
-
     pub fn is_shaping(&self, host_id: HostId) -> bool {
         self.hosts.contains_key(&host_id)
     }

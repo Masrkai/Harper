@@ -70,33 +70,6 @@ impl ArpRequest {
     }
 }
 
-/// Sent from our real MAC to stimulate an organic ARP reply from the target.
-/// When the gateway receives this, it replies with its true MAC — the victim
-/// overhears that reply (or we forward it) and updates its cache correctly.
-pub struct ArpStimulus {
-    pub ask_about_ip: Ipv4Addr, // whose MAC do we want revealed?
-    pub our_mac: MacAddr,
-    pub our_ip: Ipv4Addr,
-}
-
-impl ArpStimulus {
-    pub fn new(ask_about_ip: Ipv4Addr, our_mac: MacAddr, our_ip: Ipv4Addr) -> Self {
-        Self { ask_about_ip, our_mac, our_ip }
-    }
-
-    pub fn to_bytes(&self) -> [u8; 42] {
-        build_arp_frame(
-            MacAddr::broadcast(),  // broadcast — victim and gateway both see it
-            self.our_mac,          // honest ethernet src (our real MAC)
-            ArpOperations::Request,
-            self.our_mac,          // honest ARP sender (no spoofing)
-            self.our_ip,
-            MacAddr::zero(),
-            self.ask_about_ip,
-        )
-    }
-}
-
 pub struct GratuitousArp {
     pub claimed_ip: Ipv4Addr,
     pub our_mac: MacAddr,

@@ -64,9 +64,6 @@ impl ScanConfig {
 }
 
 pub(crate) fn is_wireless_iface(name: &str) -> bool {
-    // Covers: wlan0, wlp3s0, wlo1, wl* (generic)
-    name.starts_with("wlan")
-        || name.starts_with("wlp")
-        || name.starts_with("wlo")
-        || name.starts_with("wl")
+    crate::utils::check_interfaces::InterfaceKind::from_name(name)
+        == crate::utils::check_interfaces::InterfaceKind::Wireless
 }

@@ -248,13 +248,6 @@ pub struct DiscoveredHost {
     pub last_seen: std::time::Instant,
 }
 
-impl DiscoveredHost {
-    pub async fn resolve_hostname(&mut self) {
-        // Reverse DNS lookup — placeholder for future implementation.
-        self.hostname = None;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

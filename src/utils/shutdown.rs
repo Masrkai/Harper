@@ -26,10 +26,16 @@ pub fn spawn_shutdown_listener() -> oneshot::Receiver<()> {
     {
         let tx = Arc::clone(&tx);
         std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
+            let rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .unwrap();
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    eprintln!("[!] Failed to build shutdown runtime: {e}");
+                    return;
+                }
+            };
             rt.block_on(tokio::signal::ctrl_c()).ok();
             fire(&tx);
         });
@@ -60,7 +66,9 @@ pub fn spawn_shutdown_listener() -> oneshot::Receiver<()> {
 
 /// Sends the shutdown signal if it hasn't been sent yet.
 fn fire(tx: &Arc<std::sync::Mutex<Option<oneshot::Sender<()>>>>) {
-    if let Some(sender) = tx.lock().unwrap().take() {
-        let _ = sender.send(());
+    if let Ok(mut guard) = tx.lock() {
+        if let Some(sender) = guard.take() {
+            let _ = sender.send(());
+        }
     }
 }

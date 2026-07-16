@@ -38,16 +38,15 @@ mod tests {
 
     // ── Unknown MAC ───────────────────────────────────────────────────────────
 
-    /// The OUI 00:00:00 is not assigned to any vendor — must return "Unknown".
+    /// The OUI 00:00:00 is assigned to Xerox in the IEEE database.
     #[test]
-    fn test_unknown_oui_returns_xerox() {
+    fn test_known_xerox_oui_returns_xerox() {
         let mac = MacAddr(0x00, 0x00, 0x00, 0x00, 0x00, 0x00);
         let vendor = lookup_vendor(mac);
         assert!(
             vendor.to_lowercase().contains("xerox"),
-            "expected xerox vendor, got: {vendor}"
+            "expected Xerox vendor, got: {vendor}"
         );
-        // assert_eq!(lookup_vendor(mac), "Unknown");
     }
 
     /// A locally-administered MAC (bit 1 of first octet set) is never in the
