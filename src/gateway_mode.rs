@@ -59,7 +59,7 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
         },
     };
 
-    // ── Scanner ──────────────────────────────────────────────────────────────
+    // ── Scanner (for local MAC/IP + active-scan fallback) ────────────────────
     let scanner = ArpScanner::new(&interface_name).await?;
     let our_ip = scanner.local_ip();
     logger.info_fmt(format_args!(
@@ -80,23 +80,38 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
         logger.info_fmt(format_args!("Bypass mode — resolving {} IP(s)…", ips.len()));
         (scanner.resolve_hosts(&ips).await?, true)
     } else {
-        let cidr = get_cidr(&interface_name).ok_or("could not determine CIDR for interface")?;
-        let range = IpRange::from_cidr(&cidr)?;
-        logger.info_fmt(format_args!(
-            "Scanning {} → {}",
-            COLOR_KEYWORD.paint(&range.start.to_string()),
-            COLOR_KEYWORD.paint(&range.end.to_string()),
-        ));
+        // Cache-first: the kernel already knows every client it forwards for.
+        // An active scan is only a fallback for when the neighbour cache is
+        // empty (e.g. no client has sent a packet yet).
+        let cached =
+            crate::utils::neighbors::discover_via_cache(&interface_name, our_ip);
 
-        logger.info_fmt(format_args!("Passive ARP sniff (5 s)…"));
-        let passive = scanner.passive_sniff(std::time::Duration::from_secs(5)).await?;
+        if !cached.is_empty() {
+            logger.info_fmt(format_args!(
+                "Discovered {} client(s) from kernel ARP cache.",
+                cached.len()
+            ));
+            (cached, false)
+        } else {
+            let cidr =
+                get_cidr(&interface_name).ok_or("could not determine CIDR for interface")?;
+            let range = IpRange::from_cidr(&cidr)?;
+            logger.info_fmt(format_args!(
+                "ARP cache empty — scanning {} → {}",
+                COLOR_KEYWORD.paint(&range.start.to_string()),
+                COLOR_KEYWORD.paint(&range.end.to_string()),
+            ));
 
-        let mut d = scanner.scan(range).await?;
-        d.extend(passive);
+            logger.info_fmt(format_args!("Passive ARP sniff (5 s)…"));
+            let passive = scanner.passive_sniff(std::time::Duration::from_secs(5)).await?;
 
-        logger.info_fmt(format_args!("Post-scan passive sniff (3 s)…"));
-        d.extend(scanner.passive_sniff(std::time::Duration::from_secs(3)).await?);
-        (d, false)
+            let mut d = scanner.scan(range).await?;
+            d.extend(passive);
+
+            logger.info_fmt(format_args!("Post-scan passive sniff (3 s)…"));
+            d.extend(scanner.passive_sniff(std::time::Duration::from_secs(3)).await?);
+            (d, false)
+        }
     };
 
     // ── Vendor resolution ────────────────────────────────────────────────────

@@ -494,7 +494,7 @@ let selection = if bypass_mode {
     // ─────────────────────────────────────────────────────────────────────────
     // Wait for shutdown signal
     // ─────────────────────────────────────────────────────────────────────────
-    let mut shutdown_rx = spawn_shutdown_listener();
+    let shutdown_rx = spawn_shutdown_listener();
 
     let _ = shutdown_rx.await;
 
