@@ -105,6 +105,11 @@ impl MitmAutoManager {
         }
     }
 
+    /// Number of hosts currently managed by the MITM (for tests/observability).
+    pub(crate) fn managed_count(&self) -> usize {
+        self.managed.len()
+    }
+
     /// Runs the manager until `stop_rx` fires.
     pub async fn run(mut self, mut stop_rx: oneshot::Receiver<()>) {
         let (evt_tx, mut evt_rx) = mpsc::channel::<WatchEvent>(64);
@@ -159,7 +164,7 @@ impl MitmAutoManager {
 
     /// Handles a device seen on the wire: inserts it into the host table and,
     /// if it is a new manageable victim, pulls it into the MITM.
-    async fn on_seen(&mut self, ip: Ipv4Addr, mac: MacAddr) {
+    pub(crate) async fn on_seen(&mut self, ip: Ipv4Addr, mac: MacAddr) {
         if ip == self.excluded_ip {
             return; // never MITM the gateway/uplink
         }

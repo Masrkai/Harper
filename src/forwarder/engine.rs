@@ -1,13 +1,30 @@
 // src/forwarder/engine.rs
-use super::{ForwardRule, ForwarderCommand};
-use crate::host::table::HostTable;
+use crate::host::table::{HostId, HostTable};
 use pnet::datalink::{DataLinkReceiver, DataLinkSender};
 use pnet::packet::Packet;
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
 use pnet::util::MacAddr;
 use std::collections::HashMap;
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, mpsc};
+
+#[derive(Debug, Clone)]
+pub struct ForwardRule {
+    pub host_id: HostId,
+    pub victim_ip: Ipv4Addr,
+    pub victim_mac: MacAddr,
+    pub gateway_ip: Ipv4Addr,
+    pub gateway_mac: MacAddr,
+    pub our_mac: MacAddr,
+}
+
+#[derive(Debug)]
+pub enum ForwarderCommand {
+    Enable(ForwardRule),
+    Disable(HostId),
+    DisableAll,
+}
 
 pub struct PacketForwarder {
     our_mac: MacAddr,
@@ -322,7 +339,7 @@ impl PacketForwarder {
     /// Send a frame with exponential backoff on transient errors (ENOBUFS /
     /// WouldBlock).  All other errors are logged once and abandoned — we never
     /// want to block the forwarding loop on a single bad frame.
-    fn send_with_retry(sender: &mut dyn DataLinkSender, payload: &[u8]) {
+    pub(crate) fn send_with_retry(sender: &mut dyn DataLinkSender, payload: &[u8]) {
         let mut retries = 0u8;
         loop {
             match sender.send_to(payload, None) {
@@ -405,127 +422,15 @@ fn ip_checksum(header: &[u8]) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pnet::datalink::{DataLinkSender, NetworkInterface};
+    use crate::forwarder::mock::{
+        make_arp_frame, make_ipv4_frame, make_ipv4_frame_padded, make_ipv6_frame,
+        MockSender, OLD_DST_MAC, OLD_SRC_MAC, OUR_MAC, write_eth_header,
+    };
     use pnet::packet::Packet;
     use pnet::packet::ethernet::EthernetPacket;
     use pnet::util::MacAddr;
-    use std::io;
 
-    struct MockSender {
-        pub sent: Vec<Vec<u8>>,
-        pub inject_errors: std::collections::VecDeque<io::Error>,
-        pub call_count: usize,
-    }
-
-    impl MockSender {
-        fn new() -> Self {
-            Self {
-                sent: Vec::new(),
-                inject_errors: std::collections::VecDeque::new(),
-                call_count: 0,
-            }
-        }
-
-        fn fail_with_enobufs(mut self, n: usize) -> Self {
-            for _ in 0..n {
-                self.inject_errors
-                    .push_back(io::Error::from_raw_os_error(105));
-            }
-            self
-        }
-
-        fn fail_with_would_block(mut self, n: usize) -> Self {
-            for _ in 0..n {
-                self.inject_errors
-                    .push_back(io::Error::from(io::ErrorKind::WouldBlock));
-            }
-            self
-        }
-
-        fn fail_with_fatal(mut self, n: usize) -> Self {
-            for _ in 0..n {
-                self.inject_errors
-                    .push_back(io::Error::from(io::ErrorKind::PermissionDenied));
-            }
-            self
-        }
-    }
-
-    impl DataLinkSender for MockSender {
-        fn send_to(
-            &mut self,
-            packet: &[u8],
-            _dst: Option<NetworkInterface>,
-        ) -> Option<io::Result<()>> {
-            self.call_count += 1;
-            if let Some(err) = self.inject_errors.pop_front() {
-                return Some(Err(err));
-            }
-            self.sent.push(packet.to_vec());
-            Some(Ok(()))
-        }
-
-        fn build_and_send(
-            &mut self,
-            _num_packets: usize,
-            _packet_size: usize,
-            _func: &mut dyn FnMut(&mut [u8]),
-        ) -> Option<io::Result<()>> {
-            unimplemented!()
-        }
-    }
-
-    const OUR_MAC: MacAddr = MacAddr(0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF);
     const NEW_DST_MAC: MacAddr = MacAddr(0x11, 0x22, 0x33, 0x44, 0x55, 0x66);
-    const OLD_SRC_MAC: MacAddr = MacAddr(0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01);
-    const OLD_DST_MAC: MacAddr = MacAddr(0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x02);
-
-    fn write_eth_header(buf: &mut [u8], dst: MacAddr, src: MacAddr, ethertype: u16) {
-        buf[0..6].copy_from_slice(&[dst.0, dst.1, dst.2, dst.3, dst.4, dst.5]);
-        buf[6..12].copy_from_slice(&[src.0, src.1, src.2, src.3, src.4, src.5]);
-        buf[12] = (ethertype >> 8) as u8;
-        buf[13] = (ethertype & 0xFF) as u8;
-    }
-
-    /// Build an IPv4 frame where the IP total-length matches ip_payload_len + 20,
-    /// but the buffer is padded to ip_payload_len + 20 + 14 (no extra padding).
-    fn make_ipv4_frame(ip_payload_len: usize) -> Vec<u8> {
-        let ip_total = 20 + ip_payload_len;
-        let frame_len = 14 + ip_total;
-        let mut buf = vec![0u8; frame_len];
-        write_eth_header(&mut buf, OLD_DST_MAC, OLD_SRC_MAC, 0x0800);
-        buf[14] = 0x45; // version=4, IHL=5
-        buf[16] = (ip_total >> 8) as u8;
-        buf[17] = (ip_total & 0xFF) as u8;
-        buf
-    }
-
-    /// Build a GSO super-frame: the IP total-length field says `ip_payload_len`
-    /// bytes of payload but the buffer has extra padding beyond that.
-    fn make_ipv4_frame_padded(ip_payload_len: usize, extra_pad: usize) -> Vec<u8> {
-        let ip_total = 20 + ip_payload_len;
-        let mut buf = vec![0u8; 14 + ip_total + extra_pad];
-        write_eth_header(&mut buf, OLD_DST_MAC, OLD_SRC_MAC, 0x0800);
-        buf[14] = 0x45;
-        buf[16] = (ip_total >> 8) as u8;
-        buf[17] = (ip_total & 0xFF) as u8;
-        buf
-    }
-
-    fn make_ipv6_frame(ipv6_payload_len: usize) -> Vec<u8> {
-        let real_frame_len = 14 + 40 + ipv6_payload_len;
-        let mut buf = vec![0u8; real_frame_len + 100];
-        write_eth_header(&mut buf, OLD_DST_MAC, OLD_SRC_MAC, 0x86DD);
-        buf[18] = (ipv6_payload_len >> 8) as u8;
-        buf[19] = (ipv6_payload_len & 0xFF) as u8;
-        buf
-    }
-
-    fn make_arp_frame() -> Vec<u8> {
-        let mut buf = vec![0u8; 200];
-        write_eth_header(&mut buf, OLD_DST_MAC, OLD_SRC_MAC, 0x0806);
-        buf
-    }
 
     // ── Basic MAC rewrite ─────────────────────────────────────────────────────
 

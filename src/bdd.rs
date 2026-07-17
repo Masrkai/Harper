@@ -10,21 +10,29 @@
 // No `cucumber` harness and no step-regex engine — just the `gherkin` parser
 // plus ordinary Rust tests. This keeps the spec native while staying fully
 // under our control and running with no root privileges.
+//
+// The BDD layer is the INTEGRATION test surface. Pure-function units are covered
+// by inline `#[cfg(test)]` tests in their modules; those are intentionally NOT
+// duplicated here.
 
 #![cfg(test)]
 
 use std::path::PathBuf;
 
-use gherkin::{StepType, GherkinEnv};
-use pnet::packet::Packet;
+use gherkin::GherkinEnv;
 use pnet::util::MacAddr;
+use std::net::Ipv4Addr;
 
-use crate::cli::target_selector::TargetSelector;
-use crate::host::table::{DiscoveredHost, HostTable};
-use crate::network::packet::{ArpReply, GratuitousArp};
-use crate::utils::ip_range::{expand_one, expand_targets};
+use crate::host::table::{DiscoveredHost, HostId, HostTable};
+use crate::forwarder::mock::{make_ipv4_frame, MockSender};
+use crate::forwarder::engine::PacketForwarder;
+use crate::mitm_auto::MitmAutoManager;
+use crate::network::packet::{ArpPoison, ArpRestore};
+use crate::spoofer::{SpoofTarget, SpooferCommand};
 use crate::utils::neighbors::parse_arp_table;
-use crate::utils::tc::{build_nft_pool_rules, build_nft_rules, HostSlot, ShapeMode};
+use crate::utils::tc::{ShapeMode, TcManager};
+use crate::forwarder::ForwarderCommand;
+use tokio::sync::mpsc;
 
 /// Absolute path to `tests/features/<name>.feature`.
 fn feature_path(name: &str) -> PathBuf {
@@ -69,33 +77,8 @@ fn table_of(scenario: &gherkin::Scenario, idx: usize) -> (Vec<String>, Vec<Vec<S
     (header, rows)
 }
 
-/// A fake TcManager surface that records calls instead of shelling out to
-/// `tc`/`nft`. Lets behavioural scenarios assert on shaping intent with no root.
-struct FakeTc {
-    pool_calls: Vec<(u64, Vec<std::net::Ipv4Addr>)>,
-    host_calls: Vec<(crate::host::table::HostId, std::net::Ipv4Addr, u64)>,
-}
-
-impl FakeTc {
-    fn new() -> Self {
-        Self {
-            pool_calls: Vec::new(),
-            host_calls: Vec::new(),
-        }
-    }
-
-    fn limit_pool(&mut self, pool_kbps: u64, victim_ips: &[std::net::Ipv4Addr]) {
-        self.pool_calls.push((pool_kbps, victim_ips.to_vec()));
-    }
-
-    fn limit_host(&mut self, id: crate::host::table::HostId, ip: std::net::Ipv4Addr, kbps: u64) {
-        self.host_calls.push((id, ip, kbps));
-    }
-}
-
 /// Builds an in-memory `HostTable` from (ip, mac) pairs for behavioural tests.
 fn host_table_from(pairs: &[(&str, &str)]) -> HostTable {
-    use pnet::util::MacAddr;
     use std::net::Ipv4Addr;
     use std::time::Instant;
 
@@ -124,79 +107,6 @@ fn parse_mac(s: &str) -> MacAddr {
         i += 1;
     }
     MacAddr::new(octets[0], octets[1], octets[2], octets[3], octets[4], octets[5])
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// IP target expansion
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn bdd_ip_range_expanding_valid_target_tokens() {
-    let feat = load_feature("ip_range");
-    let sc = scenario_by_name(&feat, "Expanding valid target tokens");
-    let (_header, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let token = &row[0];
-        let expected_count: usize = row[1].parse().unwrap();
-        let expected_first = row[2].clone();
-        let expected_last = row[3].clone();
-
-        let result = expand_one(token).unwrap_or_else(|e| panic!("'{token}' failed: {e}"));
-        assert_eq!(result.len(), expected_count, "count mismatch for '{token}'");
-        assert_eq!(
-            result.first().unwrap().to_string(),
-            expected_first,
-            "first mismatch for '{token}'"
-        );
-        assert_eq!(
-            result.last().unwrap().to_string(),
-            expected_last,
-            "last mismatch for '{token}'"
-        );
-    }
-    let steps = step_texts(sc);
-    assert!(steps[0].starts_with("the following target tokens"));
-    assert!(steps[1].starts_with("each token is expanded with expand_one"));
-    assert!(steps[2].starts_with("the expansion matches"));
-}
-
-#[test]
-fn bdd_ip_range_rejecting_invalid_target_tokens() {
-    let feat = load_feature("ip_range");
-    let sc = scenario_by_name(&feat, "Rejecting invalid target tokens");
-    let (_header, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let token = &row[0];
-        assert!(
-            expand_one(token).is_err(),
-            "token '{token}' should fail ({})",
-            row[1]
-        );
-    }
-    assert!(step_texts(sc)[2].starts_with("expansion returns an error"));
-}
-
-#[test]
-fn bdd_ip_range_expanding_and_deduplicating_a_target_list() {
-    let feat = load_feature("ip_range");
-    let sc = scenario_by_name(&feat, "Expanding and deduplicating a target list");
-    let (header, rows) = table_of(sc, 0);
-
-    let raw: Vec<String> = header.into_iter()
-        .chain(rows.into_iter().map(|r| r[0].clone()))
-        .collect();
-    let result = expand_targets(&raw).unwrap();
-
-    assert_eq!(result.len(), 2, "expected 2 unique addresses");
-    assert_eq!(result[0].to_string(), "10.0.0.1");
-    assert_eq!(result[1].to_string(), "10.0.0.3");
-
-    let steps = step_texts(sc);
-    assert!(steps[2].starts_with("the result has 2 unique sorted addresses"));
-    assert!(steps[3].starts_with("the first address is 10.0.0.1"));
-    assert!(steps[4].starts_with("the last address is 10.0.0.3"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -269,74 +179,6 @@ fn bdd_neighbors_discovering_from_an_empty_arp_cache() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// nftables mark rules
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn bdd_nft_per_host_shaping_marks_each_victim_with_its_own_slot() {
-    use std::collections::HashMap;
-    use std::net::Ipv4Addr;
-
-    let feat = load_feature("nft_rules");
-    let sc = scenario_by_name(&feat, "Per-host shaping marks each victim with its own slot");
-
-    let mut hosts = HashMap::new();
-    hosts.insert(
-        1,
-        HostSlot {
-            slot: 7,
-            ip: Ipv4Addr::new(10, 0, 0, 5),
-            mode: ShapeMode::Limited(2_048),
-        },
-    );
-    let rules = build_nft_rules(&hosts);
-
-    assert!(rules.contains("ip saddr 10.0.0.5 meta mark set 7"));
-    assert!(rules.contains("ip daddr 10.0.0.5 ct mark == 0 meta mark set 7"));
-}
-
-#[test]
-fn bdd_nft_blocked_hosts_are_dropped() {
-    use std::collections::HashMap;
-    use std::net::Ipv4Addr;
-
-    let feat = load_feature("nft_rules");
-    let sc = scenario_by_name(&feat, "Blocked hosts are dropped");
-
-    let mut hosts = HashMap::new();
-    hosts.insert(
-        1,
-        HostSlot {
-            slot: 9,
-            ip: Ipv4Addr::new(10, 0, 0, 9),
-            mode: ShapeMode::Blocked,
-        },
-    );
-    let rules = build_nft_rules(&hosts);
-
-    assert!(rules.contains("ip saddr 10.0.0.9 drop"));
-    assert!(rules.contains("ip daddr 10.0.0.9 drop"));
-}
-
-#[test]
-fn bdd_nft_pool_mode_marks_every_victim_with_one_shared_mark() {
-    use std::net::Ipv4Addr;
-
-    let feat = load_feature("nft_rules");
-    let sc = scenario_by_name(&feat, "Pool mode marks every victim with one shared mark");
-    let (_h, rows) = table_of(sc, 0);
-
-    let victims: Vec<Ipv4Addr> = rows.iter().map(|r| r[0].parse().unwrap()).collect();
-    let rules = build_nft_pool_rules(&victims);
-
-    assert!(rules.contains("ip saddr 10.0.0.5 meta mark set 4094"));
-    assert!(rules.contains("ip saddr 10.0.0.6 meta mark set 4094"));
-    assert!(rules.contains("ip daddr 10.0.0.5 ct mark == 0 meta mark set 4094"));
-    assert!(rules.contains("ip daddr 10.0.0.6 ct mark == 0 meta mark set 4094"));
-    assert!(!rules.contains("meta mark set 7"));
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Gateway-mode discovery (cache-first + scan fallback)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -375,6 +217,31 @@ fn bdd_gateway_scan_fallback_when_the_cache_is_empty() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Gateway shaping modes (pool + uplink exclusion)
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// A fake TcManager surface that records calls instead of shelling out to
+/// `tc`/`nft`. Lets behavioural scenarios assert on shaping intent with no root.
+struct FakeTc {
+    pool_calls: Vec<(u64, Vec<std::net::Ipv4Addr>)>,
+    host_calls: Vec<(crate::host::table::HostId, std::net::Ipv4Addr, u64)>,
+}
+
+impl FakeTc {
+    fn new() -> Self {
+        Self {
+            pool_calls: Vec::new(),
+            host_calls: Vec::new(),
+        }
+    }
+
+    fn limit_pool(&mut self, pool_kbps: u64, victim_ips: &[std::net::Ipv4Addr]) {
+        self.pool_calls.push((pool_kbps, victim_ips.to_vec()));
+    }
+
+    #[allow(dead_code)]
+    fn limit_host(&mut self, id: crate::host::table::HostId, ip: std::net::Ipv4Addr, kbps: u64) {
+        self.host_calls.push((id, ip, kbps));
+    }
+}
 
 #[test]
 fn bdd_shaping_pool_mode_shares_one_class_across_all_victims() {
@@ -565,694 +432,7 @@ fn bdd_shaping_unresolvable_uplink_falls_back_to_self() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Network packet builders and parser
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn bdd_network_packets_arp_request_frame_fields() {
-    use crate::network::packet::ArpRequest;
-    use pnet::packet::arp::{ArpOperations, ArpPacket};
-    use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
-    use pnet::util::MacAddr;
-    use std::net::Ipv4Addr;
-
-    let feat = load_feature("network_packets");
-    let sc = scenario_by_name(&feat, "ARP request frame has correct fields");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let target_ip: Ipv4Addr = row[0].parse().unwrap();
-        let sender_ip: Ipv4Addr = row[1].parse().unwrap();
-        let sender_mac = parse_mac(&row[2]);
-
-        let frame = ArpRequest::new(target_ip, sender_ip, sender_mac).to_bytes();
-        let eth = EthernetPacket::new(&frame).unwrap();
-        let arp = ArpPacket::new(eth.payload()).unwrap();
-
-        assert_eq!(eth.get_destination(), MacAddr::broadcast());
-        assert_eq!(eth.get_source(), sender_mac);
-        assert_eq!(eth.get_ethertype(), EtherTypes::Arp);
-        assert_eq!(arp.get_operation(), ArpOperations::Request);
-        assert_eq!(arp.get_sender_hw_addr(), sender_mac);
-        assert_eq!(arp.get_sender_proto_addr(), sender_ip);
-        assert_eq!(arp.get_target_proto_addr(), target_ip);
-        assert_eq!(arp.get_target_hw_addr(), MacAddr::zero());
-    }
-}
-
-#[test]
-fn bdd_network_packets_arp_poison_victim_direction() {
-    use crate::network::packet::ArpPoison;
-    use pnet::packet::arp::{ArpOperations, ArpPacket};
-    use pnet::packet::ethernet::EthernetPacket;
-    use pnet::util::MacAddr;
-    use std::net::Ipv4Addr;
-
-    let feat = load_feature("network_packets");
-    let sc = scenario_by_name(&feat, "ARP poison victim direction lies about gateway MAC");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let victim_mac = parse_mac(&row[0]);
-        let victim_ip: Ipv4Addr = row[1].parse().unwrap();
-        let gateway_ip: Ipv4Addr = row[2].parse().unwrap();
-        let our_mac = parse_mac(&row[3]);
-
-        let frame = ArpPoison::new(victim_mac, victim_ip, gateway_ip, our_mac).to_bytes();
-        let eth = EthernetPacket::new(&frame).unwrap();
-        let arp = ArpPacket::new(eth.payload()).unwrap();
-
-        assert_eq!(eth.get_destination(), victim_mac);
-        assert_eq!(eth.get_source(), our_mac);
-        assert_eq!(arp.get_operation(), ArpOperations::Reply);
-        assert_eq!(arp.get_sender_hw_addr(), our_mac);
-        assert_eq!(arp.get_sender_proto_addr(), gateway_ip);
-        assert_eq!(arp.get_target_hw_addr(), victim_mac);
-        assert_eq!(arp.get_target_proto_addr(), victim_ip);
-    }
-}
-
-#[test]
-fn bdd_network_packets_arp_poison_gateway_direction() {
-    use crate::network::packet::ArpPoison;
-    use pnet::packet::arp::ArpPacket;
-    use pnet::packet::ethernet::EthernetPacket;
-    use pnet::util::MacAddr;
-    use std::net::Ipv4Addr;
-
-    let feat = load_feature("network_packets");
-    let sc = scenario_by_name(&feat, "ARP poison gateway direction lies about victim MAC");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let gateway_mac = parse_mac(&row[0]);
-        let gateway_ip: Ipv4Addr = row[1].parse().unwrap();
-        let victim_ip: Ipv4Addr = row[2].parse().unwrap();
-        let our_mac = parse_mac(&row[3]);
-
-        let frame = ArpPoison::new(gateway_mac, gateway_ip, victim_ip, our_mac).to_bytes();
-        let eth = EthernetPacket::new(&frame).unwrap();
-        let arp = ArpPacket::new(eth.payload()).unwrap();
-
-        assert_eq!(eth.get_destination(), gateway_mac);
-        assert_eq!(arp.get_sender_hw_addr(), our_mac);
-        assert_eq!(arp.get_sender_proto_addr(), victim_ip);
-        assert_eq!(arp.get_target_hw_addr(), gateway_mac);
-        assert_eq!(arp.get_target_proto_addr(), gateway_ip);
-    }
-}
-
-#[test]
-fn bdd_network_packets_arp_restore_fields() {
-    use crate::network::packet::ArpRestore;
-    use pnet::packet::arp::{ArpOperations, ArpPacket};
-    use pnet::packet::ethernet::EthernetPacket;
-    use pnet::util::MacAddr;
-    use std::net::Ipv4Addr;
-
-    let feat = load_feature("network_packets");
-    let sc = scenario_by_name(&feat, "ARP restore tells victim the true gateway MAC");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let target_mac = parse_mac(&row[0]);
-        let target_ip: Ipv4Addr = row[1].parse().unwrap();
-        let real_ip: Ipv4Addr = row[2].parse().unwrap();
-        let real_mac = parse_mac(&row[3]);
-
-        let frame = ArpRestore::new(target_mac, target_ip, real_ip, real_mac).to_bytes();
-        let eth = EthernetPacket::new(&frame).unwrap();
-        let arp = ArpPacket::new(eth.payload()).unwrap();
-
-        assert_eq!(eth.get_destination(), target_mac);
-        assert_eq!(eth.get_source(), real_mac);
-        assert_eq!(arp.get_operation(), ArpOperations::Reply);
-        assert_eq!(arp.get_sender_hw_addr(), real_mac);
-        assert_eq!(arp.get_sender_proto_addr(), real_ip);
-    }
-}
-
-#[test]
-fn bdd_network_packets_arp_reply_parser_accepts_poison() {
-    use crate::network::packet::{ArpPoison, ArpReply};
-    use pnet::util::MacAddr;
-    use std::net::Ipv4Addr;
-
-    let feat = load_feature("network_packets");
-    let sc = scenario_by_name(&feat, "ARP reply parser accepts poison frames");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let victim_mac = parse_mac(&row[0]);
-        let victim_ip: Ipv4Addr = row[1].parse().unwrap();
-        let gateway_ip: Ipv4Addr = row[2].parse().unwrap();
-        let our_mac = parse_mac(&row[3]);
-
-        let frame = ArpPoison::new(victim_mac, victim_ip, gateway_ip, our_mac).to_bytes();
-        let parsed = ArpReply::from_bytes(&frame).expect("poison frame must parse");
-
-        assert_eq!(parsed.sender_mac, our_mac);
-        assert_eq!(parsed.sender_ip, gateway_ip);
-        assert_eq!(parsed.target_mac, victim_mac);
-        assert_eq!(parsed.target_ip, victim_ip);
-    }
-}
-
-#[test]
-fn bdd_network_packets_arp_reply_parser_accepts_restore() {
-    use crate::network::packet::{ArpReply, ArpRestore};
-    use pnet::util::MacAddr;
-    use std::net::Ipv4Addr;
-
-    let feat = load_feature("network_packets");
-    let sc = scenario_by_name(&feat, "ARP reply parser accepts restore frames");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let victim_mac = parse_mac(&row[0]);
-        let victim_ip: Ipv4Addr = row[1].parse().unwrap();
-        let real_gateway_ip: Ipv4Addr = row[2].parse().unwrap();
-        let real_gateway_mac = parse_mac(&row[3]);
-
-        let frame = ArpRestore::new(victim_mac, victim_ip, real_gateway_ip, real_gateway_mac).to_bytes();
-        let parsed = ArpReply::from_bytes(&frame).expect("restore frame must parse");
-
-        assert_eq!(parsed.sender_mac, real_gateway_mac);
-        assert_eq!(parsed.sender_ip, real_gateway_ip);
-    }
-}
-
-#[test]
-fn bdd_network_packets_arp_reply_parser_rejects_request() {
-    use crate::network::packet::{ArpReply, ArpRequest};
-    use pnet::util::MacAddr;
-    use std::net::Ipv4Addr;
-
-    let feat = load_feature("network_packets");
-    let sc = scenario_by_name(&feat, "ARP reply parser rejects ARP request frames");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let target_ip: Ipv4Addr = row[0].parse().unwrap();
-        let sender_ip: Ipv4Addr = row[1].parse().unwrap();
-        let sender_mac = parse_mac(&row[2]);
-
-        let frame = ArpRequest::new(target_ip, sender_ip, sender_mac).to_bytes();
-        assert!(ArpReply::from_bytes(&frame).is_none(), "request must not parse as reply");
-    }
-}
-
-#[test]
-fn bdd_network_packets_arp_reply_parser_rejects_short_buffer() {
-    use crate::network::packet::ArpReply;
-
-    let feat = load_feature("network_packets");
-    let sc = scenario_by_name(&feat, "ARP reply parser rejects short buffers");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let len: usize = row[0].parse().unwrap();
-        let buf = vec![0u8; len];
-        assert!(ArpReply::from_bytes(&buf).is_none(), "len {} must return None", len);
-    }
-}
-
-#[test]
-fn bdd_network_packets_arp_reply_parser_rejects_zero_buffer() {
-    use crate::network::packet::ArpReply;
-
-    let feat = load_feature("network_packets");
-    let sc = scenario_by_name(&feat, "ARP reply parser rejects all-zero buffer");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let buf = vec![0u8; 42];
-        assert!(ArpReply::from_bytes(&buf).is_none());
-    }
-}
-
-#[test]
-fn bdd_network_packets_arp_reply_parser_rejects_empty_buffer() {
-    use crate::network::packet::ArpReply;
-
-    let feat = load_feature("network_packets");
-    let sc = scenario_by_name(&feat, "ARP reply parser rejects empty buffer");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let buf = vec![0u8; 0];
-        assert!(ArpReply::from_bytes(&buf).is_none());
-    }
-}
-
-#[test]
-fn bdd_network_packets_all_builders_produce_42_bytes() {
-    use crate::network::packet::{ArpPoison, ArpRequest, ArpRestore, GratuitousArp};
-    use pnet::util::MacAddr;
-    use std::net::Ipv4Addr;
-
-    let feat = load_feature("network_packets");
-    let sc = scenario_by_name(&feat, "All builders produce exactly 42-byte frames");
-    let (_h, rows) = table_of(sc, 0);
-
-    let victim_mac = parse_mac(&rows[0][0]);
-    let victim_ip: Ipv4Addr = rows[0][1].parse().unwrap();
-    let gateway_ip: Ipv4Addr = rows[0][2].parse().unwrap();
-    let our_mac = parse_mac(&rows[0][3]);
-    let our_ip: Ipv4Addr = "192.168.1.100".parse().unwrap();
-
-    assert_eq!(ArpRequest::new(victim_ip, our_ip, our_mac).to_bytes().len(), 42);
-    assert_eq!(ArpPoison::new(victim_mac, victim_ip, gateway_ip, our_mac).to_bytes().len(), 42);
-    assert_eq!(ArpRestore::new(victim_mac, victim_ip, gateway_ip, victim_mac).to_bytes().len(), 42);
-    assert_eq!(GratuitousArp::new(victim_ip, our_mac).to_bytes().len(), 42);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Target selection parsing
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn bdd_target_selection_single_valid_id() {
-    let feat = load_feature("target_selection");
-    let sc = scenario_by_name(&feat, "Single valid ID selects that host");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let available: Vec<usize> = row[0].split(',').map(|s| s.trim().parse().unwrap()).collect();
-        let input = &row[1];
-        let expected: Vec<usize> = row[2].split(',').filter(|s| !s.is_empty()).map(|s| s.trim().parse().unwrap()).collect();
-
-        let result = TargetSelector::parse_selection(input, &available);
-        assert_eq!(result, Some(expected), "input '{}'", input);
-    }
-}
-
-#[test]
-fn bdd_target_selection_inclusive_range() {
-    let feat = load_feature("target_selection");
-    let sc = scenario_by_name(&feat, "Inclusive range selects all IDs in range");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let available: Vec<usize> = row[0].split(',').map(|s| s.trim().parse().unwrap()).collect();
-        let input = &row[1];
-        let expected: Vec<usize> = row[2].split(',').filter(|s| !s.is_empty()).map(|s| s.trim().parse().unwrap()).collect();
-
-        let result = TargetSelector::parse_selection(input, &available);
-        assert_eq!(result, Some(expected), "input '{}'", input);
-    }
-}
-
-#[test]
-fn bdd_target_selection_range_skips_unavailable() {
-    let feat = load_feature("target_selection");
-    let sc = scenario_by_name(&feat, "Range skips unavailable IDs");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let available: Vec<usize> = row[0].split(',').map(|s| s.trim().parse().unwrap()).collect();
-        let input = &row[1];
-        let expected: Vec<usize> = row[2].split(',').filter(|s| !s.is_empty()).map(|s| s.trim().parse().unwrap()).collect();
-
-        let result = TargetSelector::parse_selection(input, &available);
-        assert_eq!(result, Some(expected), "input '{}'", input);
-    }
-}
-
-#[test]
-fn bdd_target_selection_comma_list() {
-    let feat = load_feature("target_selection");
-    let sc = scenario_by_name(&feat, "Comma-separated list selects multiple IDs");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let available: Vec<usize> = row[0].split(',').map(|s| s.trim().parse().unwrap()).collect();
-        let input = &row[1];
-        let expected: Vec<usize> = row[2].split(',').filter(|s| !s.is_empty()).map(|s| s.trim().parse().unwrap()).collect();
-
-        let result = TargetSelector::parse_selection(input, &available);
-        assert_eq!(result, Some(expected), "input '{}'", input);
-    }
-}
-
-#[test]
-fn bdd_target_selection_comma_list_spaces() {
-    let feat = load_feature("target_selection");
-    let sc = scenario_by_name(&feat, "Comma list with spaces is accepted");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let available: Vec<usize> = row[0].split(',').map(|s| s.trim().parse().unwrap()).collect();
-        let input = &row[1];
-        let expected: Vec<usize> = row[2].split(',').filter(|s| !s.is_empty()).map(|s| s.trim().parse().unwrap()).collect();
-
-        let result = TargetSelector::parse_selection(input, &available);
-        assert_eq!(result, Some(expected), "input '{}'", input);
-    }
-}
-
-#[test]
-fn bdd_target_selection_comma_list_dedup() {
-    let feat = load_feature("target_selection");
-    let sc = scenario_by_name(&feat, "Comma list deduplicates and sorts output");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let available: Vec<usize> = row[0].split(',').map(|s| s.trim().parse().unwrap()).collect();
-        let input = &row[1];
-        let expected: Vec<usize> = row[2].split(',').filter(|s| !s.is_empty()).map(|s| s.trim().parse().unwrap()).collect();
-
-        let result = TargetSelector::parse_selection(input, &available);
-        assert_eq!(result, Some(expected), "input '{}'", input);
-    }
-}
-
-#[test]
-fn bdd_target_selection_mixed_range_comma() {
-    let feat = load_feature("target_selection");
-    let sc = scenario_by_name(&feat, "Mixed range and comma list works");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let available: Vec<usize> = row[0].split(',').map(|s| s.trim().parse().unwrap()).collect();
-        let input = &row[1];
-        let expected: Vec<usize> = row[2].split(',').filter(|s| !s.is_empty()).map(|s| s.trim().parse().unwrap()).collect();
-
-        let result = TargetSelector::parse_selection(input, &available);
-        assert_eq!(result, Some(expected), "input '{}'", input);
-    }
-}
-
-#[test]
-fn bdd_target_selection_overlap_dedup() {
-    let feat = load_feature("target_selection");
-    let sc = scenario_by_name(&feat, "Overlapping range and single deduplicates");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let available: Vec<usize> = row[0].split(',').map(|s| s.trim().parse().unwrap()).collect();
-        let input = &row[1];
-        let expected: Vec<usize> = row[2].split(',').filter(|s| !s.is_empty()).map(|s| s.trim().parse().unwrap()).collect();
-
-        let result = TargetSelector::parse_selection(input, &available);
-        assert_eq!(result, Some(expected), "input '{}'", input);
-    }
-}
-
-#[test]
-fn bdd_target_selection_all_keyword() {
-    let feat = load_feature("target_selection");
-    let sc = scenario_by_name(&feat, "\"all\" keyword returns all available IDs (lowercase)");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let available: Vec<usize> = row[0].split(',').map(|s| s.trim().parse().unwrap()).collect();
-        let input = &row[1];
-        let expected: Vec<usize> = row[2].split(',').filter(|s| !s.is_empty()).map(|s| s.trim().parse().unwrap()).collect();
-
-        let result = TargetSelector::parse_selection(input, &available);
-        assert_eq!(result, Some(expected), "input '{}'", input);
-    }
-}
-
-#[test]
-fn bdd_target_selection_all_keyword_case_insensitive() {
-    let feat = load_feature("target_selection");
-    let sc = scenario_by_name(&feat, "\"all\" keyword is case-insensitive");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let available: Vec<usize> = row[0].split(',').map(|s| s.trim().parse().unwrap()).collect();
-        let input = &row[1];
-        let expected: Vec<usize> = row[2].split(',').filter(|s| !s.is_empty()).map(|s| s.trim().parse().unwrap()).collect();
-
-        let result = TargetSelector::parse_selection(input, &available);
-        assert_eq!(result, Some(expected), "input '{}'", input);
-    }
-}
-
-#[test]
-fn bdd_target_selection_all_empty() {
-    let feat = load_feature("target_selection");
-    let sc = scenario_by_name(&feat, "\"all\" with empty available returns empty list");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let available: Vec<usize> = row[0].split(',').map(|s| s.trim().parse().unwrap()).collect();
-        let input = &row[1];
-        let expected: Vec<usize> = row[2].split(',').filter(|s| !s.is_empty()).map(|s| s.trim().parse().unwrap()).collect();
-
-        let result = TargetSelector::parse_selection(input, &available);
-        assert_eq!(result, Some(expected), "input '{}'", input);
-    }
-}
-
-#[test]
-fn bdd_target_selection_invalid_id_rejected() {
-    let feat = load_feature("target_selection");
-    let sc = scenario_by_name(&feat, "Invalid ID outside available set is rejected");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let available: Vec<usize> = row[0].split(',').map(|s| s.trim().parse().unwrap()).collect();
-        let input = &row[1];
-
-        let result = TargetSelector::parse_selection(input, &available);
-        assert_eq!(result, None, "input '{}' should be rejected", input);
-    }
-}
-
-#[test]
-fn bdd_target_selection_zero_rejected() {
-    let feat = load_feature("target_selection");
-    let sc = scenario_by_name(&feat, "Zero ID is rejected");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let available: Vec<usize> = row[0].split(',').map(|s| s.trim().parse().unwrap()).collect();
-        let input = &row[1];
-
-        let result = TargetSelector::parse_selection(input, &available);
-        assert_eq!(result, None, "input '{}' should be rejected", input);
-    }
-}
-
-#[test]
-fn bdd_target_selection_negative_rejected() {
-    let feat = load_feature("target_selection");
-    let sc = scenario_by_name(&feat, "Negative ID is rejected");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let available: Vec<usize> = row[0].split(',').map(|s| s.trim().parse().unwrap()).collect();
-        let input = &row[1];
-
-        let result = TargetSelector::parse_selection(input, &available);
-        assert_eq!(result, None, "input '{}' should be rejected", input);
-    }
-}
-
-#[test]
-fn bdd_target_selection_reversed_range_rejected() {
-    let feat = load_feature("target_selection");
-    let sc = scenario_by_name(&feat, "Reversed range (start > end) is rejected");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let available: Vec<usize> = row[0].split(',').map(|s| s.trim().parse().unwrap()).collect();
-        let input = &row[1];
-
-        let result = TargetSelector::parse_selection(input, &available);
-        assert_eq!(result, None, "input '{}' should be rejected", input);
-    }
-}
-
-#[test]
-fn bdd_target_selection_range_end_above_max_rejected() {
-    let feat = load_feature("target_selection");
-    let sc = scenario_by_name(&feat, "Range end above maximum is rejected");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let available: Vec<usize> = row[0].split(',').map(|s| s.trim().parse().unwrap()).collect();
-        let input = &row[1];
-
-        let result = TargetSelector::parse_selection(input, &available);
-        assert_eq!(result, None, "input '{}' should be rejected", input);
-    }
-}
-
-#[test]
-fn bdd_target_selection_non_numeric_rejected() {
-    let feat = load_feature("target_selection");
-    let sc = scenario_by_name(&feat, "Non-numeric token is rejected");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let available: Vec<usize> = row[0].split(',').map(|s| s.trim().parse().unwrap()).collect();
-        let input = &row[1];
-
-        let result = TargetSelector::parse_selection(input, &available);
-        assert_eq!(result, None, "input '{}' should be rejected", input);
-    }
-}
-
-#[test]
-fn bdd_target_selection_float_rejected() {
-    let feat = load_feature("target_selection");
-    let sc = scenario_by_name(&feat, "Float token is rejected");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let available: Vec<usize> = row[0].split(',').map(|s| s.trim().parse().unwrap()).collect();
-        let input = &row[1];
-
-        let result = TargetSelector::parse_selection(input, &available);
-        assert_eq!(result, None, "input '{}' should be rejected", input);
-    }
-}
-
-#[test]
-fn bdd_target_selection_empty_rejected() {
-    let feat = load_feature("target_selection");
-    let sc = scenario_by_name(&feat, "Empty string returns rejected");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let available: Vec<usize> = row[0].split(',').map(|s| s.trim().parse().unwrap()).collect();
-        let input = &row[1];
-
-        let result = TargetSelector::parse_selection(input, &available);
-        assert_eq!(result, None, "input '{}' should be rejected", input);
-    }
-}
-
-#[test]
-fn bdd_target_selection_trailing_comma() {
-    let feat = load_feature("target_selection");
-    let sc = scenario_by_name(&feat, "Trailing comma skips empty token");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let available: Vec<usize> = row[0].split(',').map(|s| s.trim().parse().unwrap()).collect();
-        let input = &row[1];
-        let expected: Vec<usize> = row[2].split(',').filter(|s| !s.is_empty()).map(|s| s.trim().parse().unwrap()).collect();
-
-        let result = TargetSelector::parse_selection(input, &available);
-        assert_eq!(result, Some(expected), "input '{}'", input);
-    }
-}
-
-#[test]
-fn bdd_target_selection_comma_only() {
-    let feat = load_feature("target_selection");
-    let sc = scenario_by_name(&feat, "Comma-only does not panic");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let available: Vec<usize> = row[0].split(',').map(|s| s.trim().parse().unwrap()).collect();
-        let input = &row[1];
-
-        let result = TargetSelector::parse_selection(input, &available);
-        assert_eq!(result, None, "input '{}' should be rejected", input);
-    }
-}
-
-#[test]
-fn bdd_target_selection_parse_bandwidth_empty_zero_unlimited() {
-    let feat = load_feature("target_selection");
-    let sc = scenario_by_name(&feat, "Bandwidth parsing - empty string means unlimited");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let input = &row[0];
-        let result = TargetSelector::parse_bandwidth(input);
-        assert_eq!(result, None, "input '{}' should be unlimited", input);
-    }
-}
-
-#[test]
-fn bdd_target_selection_parse_bandwidth_zero_unlimited() {
-    let feat = load_feature("target_selection");
-    let sc = scenario_by_name(&feat, "Bandwidth parsing - zero means unlimited");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let input = &row[0];
-        let result = TargetSelector::parse_bandwidth(input);
-        assert_eq!(result, None, "input '{}' should be unlimited", input);
-    }
-}
-
-#[test]
-fn bdd_target_selection_parse_bandwidth_positive() {
-    let feat = load_feature("target_selection");
-    let sc = scenario_by_name(&feat, "Bandwidth parsing - positive integer returns Some(kbps)");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let input = &row[0];
-        let expected: u64 = row[1].parse().unwrap();
-        let result = TargetSelector::parse_bandwidth(input);
-        assert_eq!(result, Some(expected), "input '{}'", input);
-    }
-}
-
-#[test]
-fn bdd_target_selection_parse_bandwidth_large() {
-    let feat = load_feature("target_selection");
-    let sc = scenario_by_name(&feat, "Bandwidth parsing - large integer returns Some(kbps)");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let input = &row[0];
-        let expected: u64 = row[1].parse().unwrap();
-        let result = TargetSelector::parse_bandwidth(input);
-        assert_eq!(result, Some(expected), "input '{}'", input);
-    }
-}
-
-#[test]
-fn bdd_target_selection_parse_bandwidth_negative() {
-    let feat = load_feature("target_selection");
-    let sc = scenario_by_name(&feat, "Bandwidth parsing - negative returns unlimited");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let input = &row[0];
-        let result = TargetSelector::parse_bandwidth(input);
-        assert_eq!(result, None, "input '{}' should be unlimited", input);
-    }
-}
-
-#[test]
-fn bdd_target_selection_parse_bandwidth_non_numeric() {
-    let feat = load_feature("target_selection");
-    let sc = scenario_by_name(&feat, "Bandwidth parsing - non-numeric returns unlimited");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let input = &row[0];
-        let result = TargetSelector::parse_bandwidth(input);
-        assert_eq!(result, None, "input '{}' should be unlimited", input);
-    }
-}
-
-#[test]
-fn bdd_target_selection_parse_bandwidth_float() {
-    let feat = load_feature("target_selection");
-    let sc = scenario_by_name(&feat, "Bandwidth parsing - float returns unlimited");
-    let (_h, rows) = table_of(sc, 0);
-
-    for row in rows {
-        let input = &row[0];
-        let result = TargetSelector::parse_bandwidth(input);
-        assert_eq!(result, None, "input '{}' should be unlimited", input);
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Host table lifecycle
+// Host table lifecycle (insert, remove, state, stale)
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -1673,11 +853,382 @@ fn bdd_host_table_duplicate_ip_does_not_grow_table() {
     }
 }
 
-// Keep `StepType` import meaningful (documents the step-type enum is available
-// for future scenario-keyed assertions).
+// ─────────────────────────────────────────────────────────────────────────────
+// TcManager real shaping state (root-free: drives apply_host_slot directly)
+// ─────────────────────────────────────────────────────────────────────────────
+
 #[test]
-fn bdd_step_types_are_resolvable() {
-    let feat = load_feature("ip_range");
-    let sc = scenario_by_name(&feat, "Expanding valid target tokens");
-    assert_eq!(sc.steps[0].ty, StepType::Given);
+fn bdd_tc_shaping_limiting_records_kbps() {
+    let feat = load_feature("tc_shaping");
+    let _sc = scenario_by_name(&feat, "Limiting a host records it as shaping with the correct kbps");
+
+    let mut tc = TcManager::new("eth0");
+    tc.apply_host_slot(1 as HostId, "10.0.0.5".parse().unwrap(), ShapeMode::Limited(2048));
+
+    assert!(tc.is_shaping(1));
+    assert_eq!(tc.current_kbps(1), Some(2048));
+}
+
+#[test]
+fn bdd_tc_shaping_blocking_records_zero_kbps() {
+    let feat = load_feature("tc_shaping");
+    let _sc = scenario_by_name(&feat, "Blocking a host records it with kbps 0");
+
+    let mut tc = TcManager::new("eth0");
+    tc.apply_host_slot(2 as HostId, "10.0.0.9".parse().unwrap(), ShapeMode::Blocked);
+
+    assert!(tc.is_shaping(2));
+    assert_eq!(tc.current_kbps(2), Some(0));
+}
+
+#[test]
+fn bdd_tc_shaping_updating_mutates_rate() {
+    let feat = load_feature("tc_shaping");
+    let _sc = scenario_by_name(&feat, "Updating an existing host mutates its rate without allocating a new slot");
+
+    let mut tc = TcManager::new("eth0");
+    let slot1 = tc.apply_host_slot(1 as HostId, "10.0.0.5".parse().unwrap(), ShapeMode::Limited(2048));
+    let slot2 = tc.apply_host_slot(1 as HostId, "10.0.0.5".parse().unwrap(), ShapeMode::Limited(512));
+
+    assert!(tc.is_shaping(1));
+    assert_eq!(tc.current_kbps(1), Some(512));
+    assert_eq!(slot1, slot2, "update must reuse the same slot");
+}
+
+#[test]
+fn bdd_tc_shaping_slot_allocation_distinct_and_skips_passthrough() {
+    let feat = load_feature("tc_shaping");
+    let _sc = scenario_by_name(&feat, "Slot allocation is monotonic and skips the passthrough slot");
+
+    let mut tc = TcManager::new("eth0");
+    let s1 = tc.apply_host_slot(1 as HostId, "10.0.0.5".parse().unwrap(), ShapeMode::Limited(1000));
+    let s2 = tc.apply_host_slot(2 as HostId, "10.0.0.6".parse().unwrap(), ShapeMode::Limited(1000));
+    let s3 = tc.apply_host_slot(3 as HostId, "10.0.0.7".parse().unwrap(), ShapeMode::Limited(1000));
+
+    let mut slots = [s1, s2, s3];
+    slots.sort_unstable();
+    assert_eq!(slots, [s1, s2, s3], "slots must be assigned in increasing order");
+    assert_ne!(s1, s2);
+    assert_ne!(s2, s3);
+    assert_ne!(s1, s3);
+    assert!(s1 != 0xFFF && s2 != 0xFFF && s3 != 0xFFF, "no slot may be the passthrough 0xFFF");
+}
+
+#[test]
+fn bdd_tc_shaping_remove_clears_state() {
+    let feat = load_feature("tc_shaping");
+    let _sc = scenario_by_name(&feat, "Removing a host clears its shaping state");
+
+    let mut tc = TcManager::new("eth0");
+    tc.apply_host_slot(1 as HostId, "10.0.0.5".parse().unwrap(), ShapeMode::Limited(1000));
+    assert!(tc.is_shaping(1));
+
+    assert!(tc.clear_host_slot(1), "clear must report the host was present");
+    assert!(!tc.is_shaping(1), "host must no longer be shaping after clear");
+    assert_eq!(tc.current_kbps(1), None);
+}
+
+#[test]
+fn bdd_tc_shaping_unknown_host_has_no_kbps() {
+    let feat = load_feature("tc_shaping");
+    let _sc = scenario_by_name(&feat, "Querying an unknown host returns no kbps");
+
+    let tc = TcManager::new("eth0");
+    assert!(!tc.is_shaping(99));
+    assert_eq!(tc.current_kbps(99), None);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MITM auto victim lifecycle (root-free: fake channels capture orchestration)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Builds a MitmAutoManager wired to live mpsc receivers so the BDD test can
+/// observe the spoof/forward commands it emits. Shaping is disabled (no
+/// pool/per-host kbps) so no tc commands are attempted — fully root-free.
+struct MitmHarness {
+    mgr: MitmAutoManager,
+    table: std::sync::Arc<tokio::sync::RwLock<HostTable>>,
+    spoof_rx: mpsc::Receiver<SpooferCommand>,
+    fwd_rx: mpsc::Receiver<ForwarderCommand>,
+}
+
+fn make_mitm_harness(pairs: &[(&str, &str)], gateway_ip: Ipv4Addr) -> MitmHarness {
+    let mut table = HostTable::new();
+    for (ip_s, mac_s) in pairs {
+        table.insert(DiscoveredHost {
+            ip: ip_s.parse().unwrap(),
+            mac: parse_mac(mac_s),
+            hostname: None,
+            vendor: None,
+            last_seen: std::time::Instant::now(),
+        });
+    }
+    table.reindex_by_ip();
+    let table = std::sync::Arc::new(tokio::sync::RwLock::new(table));
+
+    let (spoof_tx, spoof_rx) = mpsc::channel::<SpooferCommand>(64);
+    let (fwd_tx, fwd_rx) = mpsc::channel::<ForwarderCommand>(64);
+
+    let mgr = MitmAutoManager::new(
+        "eth0".into(),
+        MacAddr::new(0, 0, 0, 0, 0, 0),
+        Ipv4Addr::new(192, 168, 1, 100),
+        gateway_ip,
+        MacAddr::new(0, 0, 0, 0, 0, 1),
+        gateway_ip, // excluded = gateway
+        std::sync::Arc::clone(&table),
+        spoof_tx,
+        fwd_tx,
+        TcManager::new("eth0"),
+        None,
+        None,
+    );
+    MitmHarness { mgr, table, spoof_rx, fwd_rx }
+}
+
+/// Drains all currently-queued forward Enable victim IPs from the receiver.
+async fn drained_fwd_victims(rx: &mut mpsc::Receiver<ForwarderCommand>) -> Vec<Ipv4Addr> {
+    let mut out = Vec::new();
+    while let Ok(cmd) = rx.try_recv() {
+        if let ForwarderCommand::Enable(rule) = cmd {
+            out.push(rule.victim_ip);
+        }
+    }
+    out
+}
+
+/// Drains all currently-queued spoof Start victim IPs from the receiver.
+async fn drained_spoof_victims(rx: &mut mpsc::Receiver<SpooferCommand>) -> Vec<Ipv4Addr> {
+    let mut out = Vec::new();
+    while let Ok(cmd) = rx.try_recv() {
+        if let SpooferCommand::Start(target) = cmd {
+            out.push(target.victim_ip);
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn bdd_mitm_auto_seed_marks_hosts_managed() {
+    let feat = load_feature("mitm_auto");
+    let _sc = scenario_by_name(&feat, "Seeding victim ids marks them as managed");
+
+    let mut h = make_mitm_harness(
+        &[("192.168.1.5", "AA:BB:CC:00:00:02"), ("192.168.1.6", "AA:BB:CC:00:00:03")],
+        Ipv4Addr::new(192, 168, 1, 1),
+    );
+    let id5 = h.table.read().await.get_by_ip(Ipv4Addr::new(192, 168, 1, 5)).unwrap().id;
+    let id6 = h.table.read().await.get_by_ip(Ipv4Addr::new(192, 168, 1, 6)).unwrap().id;
+
+    h.mgr.seed(&[id5, id6]).await;
+
+    let fwd = drained_fwd_victims(&mut h.fwd_rx).await;
+    assert!(fwd.is_empty(), "seed must not emit forward commands");
+    let managed = h.mgr.managed_count();
+    assert_eq!(managed, 2, "both seeded hosts must be managed");
+}
+
+#[tokio::test]
+async fn bdd_mitm_auto_seen_non_gateway_added_as_victim() {
+    let feat = load_feature("mitm_auto");
+    let _sc = scenario_by_name(&feat, "A seen device that is not the gateway is added as a victim");
+
+    let mut h = make_mitm_harness(&[("192.168.1.5", "AA:BB:CC:00:00:02")], Ipv4Addr::new(192, 168, 1, 1));
+
+    h.mgr.on_seen(Ipv4Addr::new(192, 168, 1, 5), MacAddr::new(0xAA, 0, 0, 0, 0, 2)).await;
+
+    let fwd = drained_fwd_victims(&mut h.fwd_rx).await;
+    let spoof = drained_spoof_victims(&mut h.spoof_rx).await;
+    assert!(fwd.contains(&Ipv4Addr::new(192, 168, 1, 5)), "forward Enable for victim");
+    assert!(spoof.contains(&Ipv4Addr::new(192, 168, 1, 5)), "spoof Start for victim");
+}
+
+#[tokio::test]
+async fn bdd_mitm_auto_gateway_never_added() {
+    let feat = load_feature("mitm_auto");
+    let _sc = scenario_by_name(&feat, "The gateway is never added as a victim");
+
+    let mut h = make_mitm_harness(&[("192.168.1.1", "AA:BB:CC:00:00:01")], Ipv4Addr::new(192, 168, 1, 1));
+
+    h.mgr.on_seen(Ipv4Addr::new(192, 168, 1, 1), MacAddr::new(0, 0, 0, 0, 0, 1)).await;
+
+    let fwd = drained_fwd_victims(&mut h.fwd_rx).await;
+    let spoof = drained_spoof_victims(&mut h.spoof_rx).await;
+    assert!(fwd.is_empty(), "no forward command for the gateway");
+    assert!(spoof.is_empty(), "no spoof command for the gateway");
+}
+
+#[tokio::test]
+async fn bdd_mitm_auto_reseen_deduped() {
+    let feat = load_feature("mitm_auto");
+    let _sc = scenario_by_name(&feat, "A re-seen already-managed device is de-duplicated");
+
+    let mut h = make_mitm_harness(&[("192.168.1.5", "AA:BB:CC:00:00:02")], Ipv4Addr::new(192, 168, 1, 1));
+
+    h.mgr.on_seen(Ipv4Addr::new(192, 168, 1, 5), MacAddr::new(0xAA, 0, 0, 0, 0, 2)).await;
+    h.mgr.on_seen(Ipv4Addr::new(192, 168, 1, 5), MacAddr::new(0xAA, 0, 0, 0, 0, 2)).await;
+
+    let fwd = drained_fwd_victims(&mut h.fwd_rx).await;
+    let count = fwd.iter().filter(|&&ip| ip == Ipv4Addr::new(192, 168, 1, 5)).count();
+    assert_eq!(count, 1, "re-seen victim must emit exactly one Enable");
+    assert_eq!(h.mgr.managed_count(), 1, "managed set must not double-add");
+}
+
+#[tokio::test]
+async fn bdd_mitm_auto_late_join_grows_managed() {
+    let feat = load_feature("mitm_auto");
+    let _sc = scenario_by_name(&feat, "A late-joining device grows the managed set");
+
+    let mut h = make_mitm_harness(
+        &[("192.168.1.5", "AA:BB:CC:00:00:02"), ("192.168.1.7", "AA:BB:CC:00:00:07")],
+        Ipv4Addr::new(192, 168, 1, 1),
+    );
+
+    h.mgr.on_seen(Ipv4Addr::new(192, 168, 1, 5), MacAddr::new(0xAA, 0, 0, 0, 0, 2)).await;
+    h.mgr.on_seen(Ipv4Addr::new(192, 168, 1, 7), MacAddr::new(0xAA, 0, 0, 0, 0, 7)).await;
+
+    let fwd = drained_fwd_victims(&mut h.fwd_rx).await;
+    assert!(fwd.contains(&Ipv4Addr::new(192, 168, 1, 5)));
+    assert!(fwd.contains(&Ipv4Addr::new(192, 168, 1, 7)));
+    assert_eq!(h.mgr.managed_count(), 2, "both victims must be managed");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Spoofer ARP poison direction (root-free: build frames, assert field mapping)
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn spoof_target() -> SpoofTarget {
+    SpoofTarget::new(
+        1,
+        Ipv4Addr::new(192, 168, 1, 5),
+        MacAddr::new(0xAA, 0xBB, 0xCC, 0x00, 0x00, 0x02),
+        Ipv4Addr::new(192, 168, 1, 1),
+        MacAddr::new(0xAA, 0xBB, 0xCC, 0x00, 0x00, 0x01),
+    )
+}
+
+#[test]
+fn bdd_spoofer_victim_direction_lies_about_gateway_mac() {
+    let feat = load_feature("spoofer");
+    let _sc = scenario_by_name(
+        &feat,
+        "Victim-direction poison claims the gateway IP is at our MAC",
+    );
+    let target = spoof_target();
+    let our_mac = MacAddr::new(0xAA, 0xBB, 0xCC, 0x00, 0x00, 0xFF);
+
+    // Mirror PoisonLoop::run victim-direction construction.
+    let frame = ArpPoison::new(target.victim_mac, target.victim_ip, target.gateway_ip, our_mac);
+
+    assert_eq!(frame.target_mac, target.victim_mac);
+    assert_eq!(frame.target_ip, target.victim_ip);
+    assert_eq!(frame.spoofed_ip, target.gateway_ip, "victim told gateway IP is here");
+    assert_eq!(frame.our_mac, our_mac, "victim told gateway IP maps to our MAC");
+}
+
+#[test]
+fn bdd_spoofer_gateway_direction_lies_about_victim_mac() {
+    let feat = load_feature("spoofer");
+    let _sc = scenario_by_name(
+        &feat,
+        "Gateway-direction poison claims the victim IP is at our MAC",
+    );
+    let target = spoof_target();
+    let our_mac = MacAddr::new(0xAA, 0xBB, 0xCC, 0x00, 0x00, 0xFF);
+
+    // Mirror PoisonLoop::run gateway-direction construction.
+    let frame = ArpPoison::new(target.gateway_mac, target.gateway_ip, target.victim_ip, our_mac);
+
+    assert_eq!(frame.target_mac, target.gateway_mac);
+    assert_eq!(frame.target_ip, target.gateway_ip);
+    assert_eq!(frame.spoofed_ip, target.victim_ip, "gateway told victim IP is here");
+    assert_eq!(frame.our_mac, our_mac, "gateway told victim IP maps to our MAC");
+}
+
+#[test]
+fn bdd_spoofer_restore_tells_true_gateway_mac() {
+    let feat = load_feature("spoofer");
+    let _sc = scenario_by_name(
+        &feat,
+        "Restore-on-stop tells the victim the true gateway MAC",
+    );
+    let target = spoof_target();
+
+    // Mirror PoisonLoop::restore victim-direction construction.
+    let frame = ArpRestore::new(
+        target.victim_mac,
+        target.victim_ip,
+        target.gateway_ip,
+        target.gateway_mac,
+    );
+
+    assert_eq!(frame.target_mac, target.victim_mac);
+    assert_eq!(frame.target_ip, target.victim_ip);
+    assert_eq!(frame.real_ip, target.gateway_ip);
+    assert_eq!(frame.real_mac, target.gateway_mac, "restore reveals the TRUE gateway MAC");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Forwarder packet path (root-free: shared MockSender + real retry/relay logic)
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn fwd_our_mac() -> MacAddr {
+    MacAddr::new(0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF)
+}
+
+fn fwd_new_dst() -> MacAddr {
+    MacAddr::new(0x11, 0x22, 0x33, 0x44, 0x55, 0x66)
+}
+
+#[test]
+fn bdd_forwarder_large_ipv4_fragmented_to_mtu() {
+    let feat = load_feature("forwarder");
+    let _sc = scenario_by_name(&feat, "A large IPv4 frame is fragmented to fit the MTU");
+
+    let mut sender = MockSender::new();
+    let frame = make_ipv4_frame(9000);
+    PacketForwarder::relay_packet(&mut sender, &frame, fwd_new_dst(), fwd_our_mac());
+
+    assert!(sender.sent.len() > 1, "expected fragmentation into multiple frames");
+    for (i, frag) in sender.sent.iter().enumerate() {
+        assert!(frag.len() <= 1514, "fragment {} is {} bytes — exceeds MTU", i, frag.len());
+    }
+}
+
+#[test]
+fn bdd_forwarder_wouldblock_retries_then_succeeds() {
+    let feat = load_feature("forwarder");
+    let _sc = scenario_by_name(&feat, "A WouldBlock error triggers a retry that succeeds");
+
+    let mut sender = MockSender::new().fail_with_would_block(1);
+    let frame = make_ipv4_frame(20);
+    PacketForwarder::send_with_retry(&mut sender, &frame);
+
+    assert_eq!(sender.sent.len(), 1, "frame delivered after one retry");
+}
+
+#[test]
+fn bdd_forwarder_enobufs_exhausts_retry_budget() {
+    let feat = load_feature("forwarder");
+    let _sc = scenario_by_name(&feat, "Four ENOBUFS errors exhaust the retry budget");
+
+    let mut sender = MockSender::new().fail_with_enobufs(4);
+    let frame = make_ipv4_frame(20);
+    PacketForwarder::send_with_retry(&mut sender, &frame);
+
+    assert_eq!(sender.sent.len(), 0, "no frame delivered after exhausting retries");
+    assert_eq!(sender.call_count, 4, "sender attempted exactly four times");
+}
+
+#[test]
+fn bdd_forwarder_fatal_error_not_retried() {
+    let feat = load_feature("forwarder");
+    let _sc = scenario_by_name(&feat, "A fatal error is not retried");
+
+    let mut sender = MockSender::new().fail_with_fatal(1);
+    let frame = make_ipv4_frame(20);
+    PacketForwarder::send_with_retry(&mut sender, &frame);
+
+    assert_eq!(sender.call_count, 1, "fatal error attempted exactly once");
+    assert_eq!(sender.sent.len(), 0, "no frame delivered on fatal error");
 }

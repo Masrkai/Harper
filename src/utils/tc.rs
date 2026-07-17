@@ -398,14 +398,27 @@ impl TcManager {
         Ok(())
     }
 
+    /// Pure state mutation: record a host's shaping slot without touching the
+    /// kernel. Extracted from `add_host_inner` so the slot-allocation and map
+    /// update can be asserted root-free (e.g. BDD tests call this directly).
+    /// Reuses the existing slot when the host is already shaped (mirrors the
+    /// Limited→Limited update path in `limit_host`), otherwise allocates fresh.
+    pub(crate) fn apply_host_slot(&mut self, host_id: HostId, ip: Ipv4Addr, mode: ShapeMode) -> u16 {
+        let slot = match self.hosts.get(&host_id) {
+            Some(existing) => existing.slot,
+            None => self.alloc_slot(),
+        };
+        self.hosts.insert(host_id, HostSlot { slot, ip, mode });
+        slot
+    }
+
     async fn add_host_inner(
         &mut self,
         host_id: HostId,
         ip: Ipv4Addr,
         mode: ShapeMode,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let slot = self.alloc_slot();
-        self.hosts.insert(host_id, HostSlot { slot, ip, mode });
+        let slot = self.apply_host_slot(host_id, ip, mode);
 
         let kbps = match mode {
             ShapeMode::Limited(k) => k,
@@ -423,11 +436,19 @@ impl TcManager {
         Ok(())
     }
 
+    /// Pure state mutation: drop a host's shaping slot without touching the
+    /// kernel. Extracted from `remove_host_inner` so the state clear can be
+    /// asserted root-free (e.g. BDD tests call this directly).
+    pub(crate) fn clear_host_slot(&mut self, host_id: HostId) -> bool {
+        self.hosts.remove(&host_id).is_some()
+    }
+
     async fn remove_host_inner(&mut self, host_id: HostId) -> Result<(), Box<dyn std::error::Error>> {
         let info = match self.hosts.remove(&host_id) {
             Some(s) => s,
             None => return Ok(()),
         };
+        self.clear_host_slot(host_id);
         self.remove_htb_leaf(info.slot).await;
         self.nft_rebuild_chain().await?;
         println!("[+] tc: shaping removed for host {}", host_id);

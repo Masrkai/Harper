@@ -1,17 +1,17 @@
 [package]
 name = "harper"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 [dependencies]
-tokio = { version = "1.50.0", features = ["full", "rt-multi-thread"] }
-nix = { version = "0.31.2", features = ["user", "net"] }
+tokio = { version = "1.53.0", features = ["full", "rt-multi-thread"] }
+nix = { version = "0.31.3", features = ["user", "net"] }
 pnet = "0.35.0"
-rtnetlink = "0.20.0"
+rtnetlink = "0.21.0"
 oui-data = "0.2.1"
-clap = { version = "4", features = ["derive"] }
-ctrlc = { version = "3", features = ["termination"] }
+clap = { version = "4.6.2", features = ["derive"] }
+ctrlc = { version = "3.5.2", features = ["termination"] }
 # libc = "0.2"
 
 [dev-dependencies]
-gherkin = "0.16"
+gherkin = "0.16.0"
