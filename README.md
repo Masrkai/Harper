@@ -87,17 +87,17 @@ sudo harper -t 192.168.1.10-20 -b 512
 
 ```bash
 # Shape all discovered clients at 1 Mbps each
-sudo harper --gateway_mode --all -b 1024
+sudo harper --gateway-mode --all -b 1024
 
 # Shape specific targets only (skips scan)
-sudo harper --gateway_mode -t 10.0.0.5 -t 10.0.0.10 -b 500
+sudo harper --gateway-mode -t 10.0.0.5 -t 10.0.0.10 -b 500
 
 # Pool mode: all shaped clients share ONE bandwidth pool
 # Unshaped traffic (the "attacker" / uplink) keeps the rest of the line
-sudo harper --gateway_mode --all --pool 2048
+sudo harper --gateway-mode --all --pool 2048
 
 # Exclude a repeater/uplink by MAC or IP from the victim pool
-sudo harper --gateway_mode --all --uplink AA:BB:CC:DD:EE:FF
+sudo harper --gateway-mode --all --uplink AA:BB:CC:DD:EE:FF
 ```
 
 ### Key differences between modes
