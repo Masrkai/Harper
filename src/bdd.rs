@@ -449,6 +449,65 @@ fn bdd_shaping_mitm_pool_applies_across_selected_victims_excluding_gateway() {
 }
 
 #[test]
+fn bdd_shaping_mitm_all_dynamically_adds_late_victim_to_pool() {
+    use std::net::Ipv4Addr;
+
+    let feat = load_feature("shaping_modes");
+    let sc = scenario_by_name(
+        &feat,
+        "MITM --all dynamically adds a late-joining victim to the shared pool",
+    );
+
+    let mut table = host_table_from(&[
+        ("192.168.1.1", "AA:BB:CC:00:00:01"), // gateway
+        ("192.168.1.5", "AA:BB:CC:00:00:02"),
+        ("192.168.1.6", "AA:BB:CC:00:00:03"),
+    ]);
+    let gateway_ip: Ipv4Addr = "192.168.1.1".parse().unwrap();
+    let excluded_ip = crate::gateway_mode::resolve_uplink(&table, &None, gateway_ip);
+    assert_eq!(excluded_ip, gateway_ip);
+
+    let pool_kbps = 1000u64;
+    let mut tc = FakeTc::new();
+
+    // Initial seed: victims 192.168.1.5 and 192.168.1.6.
+    let initial: Vec<Ipv4Addr> = table
+        .iter()
+        .filter(|e| e.host.ip != excluded_ip)
+        .map(|e| e.host.ip)
+        .collect();
+    tc.limit_pool(pool_kbps, &initial);
+
+    // A late-joining device appears (mirrors MitmAutoManager::on_seen).
+    table.insert(DiscoveredHost {
+        ip: Ipv4Addr::new(192, 168, 1, 7),
+        mac: parse_mac("AA:BB:CC:00:00:04"),
+        hostname: None,
+        vendor: None,
+        last_seen: std::time::Instant::now(),
+    });
+    table.reindex_by_ip();
+
+    // Pool is re-applied across the full managed set (idempotent limit_pool).
+    let updated: Vec<Ipv4Addr> = table
+        .iter()
+        .filter(|e| e.host.ip != excluded_ip)
+        .map(|e| e.host.ip)
+        .collect();
+    tc.limit_pool(pool_kbps, &updated);
+
+    assert_eq!(tc.pool_calls.len(), 2, "pool re-applied once for the new victim");
+    let (kbps, victims) = &tc.pool_calls[1];
+    assert_eq!(*kbps, pool_kbps);
+    assert_eq!(victims.len(), 3, "late victim must be added to the pool");
+    assert!(victims.contains(&Ipv4Addr::new(192, 168, 1, 5)));
+    assert!(victims.contains(&Ipv4Addr::new(192, 168, 1, 6)));
+    assert!(victims.contains(&Ipv4Addr::new(192, 168, 1, 7)));
+    assert!(!victims.contains(&gateway_ip), "gateway must never be pooled");
+    assert!(step_texts(sc)[3].starts_with("the shared pool"));
+}
+
+#[test]
 fn bdd_shaping_uplink_exclusion_by_mac() {
     use std::net::Ipv4Addr;
 

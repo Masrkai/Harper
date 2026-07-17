@@ -2,6 +2,7 @@
 mod cli;
 mod forwarder;
 mod gateway_mode;
+mod mitm_auto;
 mod host;
 mod network;
 mod scanner;
@@ -423,6 +424,30 @@ fn parse_mac(s: &str) -> Option<MacAddr> {
             host_ids: ids,
             bandwidth_kbps,
         }
+    } else if cli.all {
+        // `--all` in MITM mode: auto-select every discovered host except the
+        // uplink/gateway, then keep dynamically adding new arrivals at runtime.
+        let ids: Vec<_> = host_table.read().await.iter()
+            .filter(|e| e.host.ip != excluded_ip)
+            .map(|e| e.id)
+            .collect();
+        if ids.is_empty() {
+            logger.error_fmt(format_args!("No targets after discovery."));
+            std::process::exit(1);
+        }
+        logger.info_fmt(format_args!("Auto-select (--all): {} target(s).", ids.len()));
+
+        // `--pool` overrides per-host bandwidth; skip the interactive prompt.
+        let bandwidth_kbps = if cli.pool.is_some() {
+            None
+        } else {
+            resolve_bandwidth(cli.bandwidth, &mut logger)
+        };
+
+        cli::target_selector::SelectionResult {
+            host_ids: ids,
+            bandwidth_kbps,
+        }
     } else {
         // Interactive path with TargetSelector
         match {
@@ -439,6 +464,7 @@ fn parse_mac(s: &str) -> Option<MacAddr> {
 
     // ── Grab what we need from the scanner then drop it ──────────────────────
     let our_mac = scanner.local_mac();
+    let our_ip = scanner.local_ip();
     drop(scanner);
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -463,7 +489,9 @@ fn parse_mac(s: &str) -> Option<MacAddr> {
     shutdown_manager.add(Box::new(nft_gate));
 
     // ── tc bandwidth shaping ─────────────────────────────────────────────────
-    let mut tc = TcManager::new(&interface_name);
+    // Wrapped in Option so ownership can be handed to the dynamic MITM manager
+    // (--all) at setup time; in other modes it stays here for teardown.
+    let mut tc = Some(TcManager::new(&interface_name));
 
     // Pool mode: all selected victims share ONE HTB class of `pool_kbps`.
     // Unshaped traffic (the attacker) keeps the rest of the line rate via the
@@ -482,7 +510,7 @@ fn parse_mac(s: &str) -> Option<MacAddr> {
                 "--pool and --bandwidth are mutually exclusive; using --pool (shared)."
             ));
         }
-        match tc.init().await {
+        match tc.as_mut().unwrap().init().await {
             Err(e) => {
                 logger.error_fmt(format_args!("tc init failed: {e}"));
                 shutdown_manager.shutdown().await;
@@ -505,7 +533,7 @@ fn parse_mac(s: &str) -> Option<MacAddr> {
                     shutdown_manager.shutdown().await;
                     std::process::exit(1);
                 }
-                match tc.limit_pool(pool_kbps, &victim_ips).await {
+                match tc.as_mut().unwrap().limit_pool(pool_kbps, &victim_ips).await {
                     Ok(()) => logger.info_fmt(format_args!(
                         "tc: {} client(s) share a {} kbps pool; attacker keeps the rest.",
                         victim_ips.len(),
@@ -516,7 +544,7 @@ fn parse_mac(s: &str) -> Option<MacAddr> {
             }
         }
     } else if let Some(kbps) = selection.bandwidth_kbps {
-        match tc.init().await {
+        match tc.as_mut().unwrap().init().await {
             Err(e) => {
                 logger.error_fmt(format_args!("tc init failed: {e}"));
                 shutdown_manager.shutdown().await;
@@ -531,7 +559,7 @@ fn parse_mac(s: &str) -> Option<MacAddr> {
                 let table = host_table.read().await;
                 for &id in &selection.host_ids {
                     if let Some(entry) = table.get_by_id(id) {
-                        match tc.limit_host(id, entry.host.ip, kbps).await {
+                        match tc.as_mut().unwrap().limit_host(id, entry.host.ip, kbps).await {
                             Ok(()) => logger.info_fmt(format_args!(
                                 "tc: [{}] {} → {} kbps",
                                 id,
@@ -556,7 +584,7 @@ fn parse_mac(s: &str) -> Option<MacAddr> {
         Ok(f) => f,
         Err(e) => {
             logger.error_fmt(format_args!("Could not create packet forwarder: {e}"));
-            tc.cleanup().await;
+            tc.as_mut().unwrap().cleanup().await;
             shutdown_manager.shutdown().await;
             std::process::exit(1);
         }
@@ -617,6 +645,41 @@ fn parse_mac(s: &str) -> Option<MacAddr> {
         }
     }
 
+    // ── Dynamic MITM manager (--all) ──────────────────────────────────────────
+    // When --all is given, Harper keeps watching the wire and auto-adds future
+    // devices to the MITM. The manager takes ownership of `tc` (so it can shape
+    // new victims and tear tc down on exit); in non- --all mode `tc` stays with
+    // the shutdown manager as before.
+    let (auto_stop_tx, auto_task) = if cli.all {
+        let spoof_tx_clone = spoof_tx.clone();
+        let fwd_tx_clone = fwd_tx.clone();
+
+        let mut manager = mitm_auto::MitmAutoManager::new(
+            interface_name.clone(),
+            our_mac,
+            our_ip,
+            gateway_ip,
+            gateway_mac,
+            excluded_ip,
+            Arc::clone(&host_table),
+            spoof_tx_clone,
+            fwd_tx_clone,
+            tc.take().unwrap(),
+            cli.pool,
+            selection.bandwidth_kbps,
+        );
+        manager.seed(&selection.host_ids).await;
+
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move { manager.run(stop_rx).await });
+        logger.info_fmt(format_args!(
+            "Dynamic MITM (--all) active: new devices will be auto-added; stale ones evicted."
+        ));
+        (Some(stop_tx), Some(task))
+    } else {
+        (None, None)
+    };
+
     println!();
     logger.info_fmt(format_args!(
         "{}",
@@ -645,8 +708,14 @@ fn parse_mac(s: &str) -> Option<MacAddr> {
     tokio::time::sleep(restore_wait).await;
     logger.info_fmt(format_args!("ARP caches restoration sent."));
 
-    shutdown_manager.add(Box::new(tc));
-    shutdown_manager.shutdown().await;
+    if let (Some(stop_tx), Some(task)) = (auto_stop_tx, auto_task) {
+        // Signal the dynamic manager; it evicts all victims and runs tc.cleanup().
+        let _ = stop_tx.send(());
+        let _ = task.await;
+    } else {
+        shutdown_manager.add(Box::new(tc.take().unwrap()));
+        shutdown_manager.shutdown().await;
+    }
 
     logger.info_fmt(format_args!("Done."));
     Ok(())

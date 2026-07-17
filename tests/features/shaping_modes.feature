@@ -22,6 +22,16 @@ Feature: Gateway shaping modes
     Then one shared class of 1000 kbps is created for 192.168.1.5 and 192.168.1.6
     And the gateway 192.168.1.1 is not pooled
 
+  Scenario: MITM --all dynamically adds a late-joining victim to the shared pool
+    Given the discovered hosts
+      | ip          | mac               | is_gateway |
+      | 192.168.1.1 | AA:BB:CC:00:00:01 | true       |
+      | 192.168.1.5 | AA:BB:CC:00:00:02 | false      |
+    When MITM pool mode is applied with 1000 kbps
+    And a new device 192.168.1.7 with mac AA:BB:CC:00:00:04 joins the network
+    Then the shared pool of 1000 kbps now covers 192.168.1.5, 192.168.1.6 and 192.168.1.7
+    And the gateway 192.168.1.1 is not pooled
+
   Scenario: Uplink exclusion removes the bottleneck device from victims
     Given a known host with ip 10.0.0.1 and mac AA:BB:CC:00:00:01
     And the candidate victim pool contains 10.0.0.1 and 10.0.0.2
