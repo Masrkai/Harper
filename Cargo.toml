@@ -12,3 +12,6 @@ oui-data = "0.2.1"
 clap = { version = "4", features = ["derive"] }
 ctrlc = { version = "3", features = ["termination"] }
 # libc = "0.2"
+
+[dev-dependencies]
+gherkin = "0.16"

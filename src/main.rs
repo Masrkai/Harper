@@ -9,11 +9,15 @@ mod spoofer;
 mod utils;
 mod infra;
 
+#[cfg(test)]
+mod bdd;
+
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use clap::Parser;
+use pnet::util::MacAddr;
 
 use network::calculator::get_cidr;
 use scanner::ArpScanner;
@@ -78,6 +82,26 @@ struct Cli {
     /// Recommended for ethernet networks with strict ARP protection.
     #[arg(long, default_value_t = false)]
     one_sided: bool,
+
+    /// Gateway mode: shape EVERY discovered client automatically.
+    /// Skips the interactive target selector.
+    #[arg(long, default_value_t = false)]
+    all: bool,
+
+    /// Gateway mode: shared bandwidth pool in kbps.
+    /// All shaped clients share ONE HTB class of this size; unshaped traffic
+    /// (the attacker) keeps the rest of the line rate. Mutually exclusive with
+    /// --bandwidth (--pool wins if both are given).
+    #[arg(long, value_name = "KBPS")]
+    pool: Option<u64>,
+
+    /// Gateway/MITM mode: explicitly name the bottleneck uplink device to
+    /// EXCLUDE from victims, instead of the auto-detected gateway.
+    /// Accepts an IPv4 address or a MAC (e.g. when sitting behind a repeater
+    /// whose airtime is the real bottleneck). Falls back to gateway exclusion
+    /// if it cannot be resolved to a known host.
+    #[arg(long, value_name = "IP|MAC")]
+    uplink: Option<String>,
 }
 
 
@@ -118,6 +142,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // --target is valid in gateway mode: skips the scan and shapes
             // only the specified IPs directly.
             targets: cli.targets.clone(),
+            all: cli.all,
+            pool_kbps: cli.pool,
+            uplink: cli.uplink.clone(),
         };
         return gateway_mode::run(cfg).await.map_err(Into::into);
     }
@@ -274,9 +301,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Target selection ─────────────────────────────────────────────────────
 
-    // Add near the top of main.rs, after imports:
-
-/// Prompts for bandwidth if not provided, returns the user's choice.
+    /// Prompts for bandwidth if not provided, returns the user's choice.
 fn resolve_bandwidth(
     from_cli: Option<u64>,
     logger: &mut Logger,
@@ -319,29 +344,85 @@ fn resolve_bandwidth(
 }
 
 
-let selection = if bypass_mode {
-    let gw_id = host_table.read().await.get_by_ip(gateway_ip).map(|e| e.id);
-    let ids: Vec<_> = host_table.read().await.iter()
-        .filter(|e| Some(e.id) != gw_id)
-        .map(|e| e.id)
-        .collect();
-    if ids.is_empty() {
-        logger.error_fmt(format_args!("No targets after bypass resolution."));
-        std::process::exit(1);
+/// Resolves `--uplink <ip|mac>` to the IP of the device to exclude from
+/// victims in MITM mode. Falls back to `gateway_ip` when absent or unresolved.
+fn resolve_uplink(
+    table: &HostTable,
+    uplink: &Option<String>,
+    gateway_ip: Ipv4Addr,
+) -> Ipv4Addr {
+    let Some(hint) = uplink else {
+        return gateway_ip;
+    };
+    if let Ok(ip) = hint.parse::<Ipv4Addr>() {
+        if table.get_by_ip(ip).is_some() {
+            return ip;
+        }
+        return gateway_ip;
     }
-    logger.info_fmt(format_args!("Bypass: {} target(s).", ids.len()));
-
-    let bandwidth_kbps = resolve_bandwidth(cli.bandwidth, &mut logger);
-
-    cli::target_selector::SelectionResult {
-        host_ids: ids,
-        bandwidth_kbps,
+    if let Some(mac) = parse_mac(hint) {
+        if let Some(entry) = table.get_by_mac(mac) {
+            return entry.host.ip;
+        }
     }
+    gateway_ip
+}
+
+/// Parses a colon-separated MAC ("00:11:22:33:44:55") into `MacAddr`.
+fn parse_mac(s: &str) -> Option<MacAddr> {
+    let mut octets = [0u8; 6];
+    let mut i = 0;
+    for part in s.split(':') {
+        if i >= 6 {
+            return None;
+        }
+        octets[i] = u8::from_str_radix(part, 16).ok()?;
+        i += 1;
+    }
+    if i != 6 {
+        return None;
+    }
+    Some(MacAddr::new(
+        octets[0], octets[1], octets[2], octets[3], octets[4], octets[5],
+    ))
+}
+
+
+    let excluded_ip = {
+        let t = host_table.read().await;
+        resolve_uplink(&t, &cli.uplink, gateway_ip)
+    };
+    if cli.uplink.is_some() && excluded_ip == gateway_ip {
+        logger.error_fmt(format_args!(
+            "Could not resolve --uplink {:?} to a known host; falling back to gateway exclusion.",
+            cli.uplink.as_deref().unwrap()
+        ));
+    } else if cli.uplink.is_some() {
+        logger.info_fmt(format_args!("Excluding uplink {} from victims.", excluded_ip));
+    }
+
+    let selection = if bypass_mode {
+        let ids: Vec<_> = host_table.read().await.iter()
+            .filter(|e| e.host.ip != excluded_ip)
+            .map(|e| e.id)
+            .collect();
+        if ids.is_empty() {
+            logger.error_fmt(format_args!("No targets after bypass resolution."));
+            std::process::exit(1);
+        }
+        logger.info_fmt(format_args!("Bypass: {} target(s).", ids.len()));
+
+        let bandwidth_kbps = resolve_bandwidth(cli.bandwidth, &mut logger);
+
+        cli::target_selector::SelectionResult {
+            host_ids: ids,
+            bandwidth_kbps,
+        }
     } else {
         // Interactive path with TargetSelector
         match {
             let t = host_table.read().await;
-            TargetSelector::select(&t, gateway_ip) // ← Prompts user
+            TargetSelector::select(&t, excluded_ip) // ← Prompts user; excludes uplink/gateway
         } {
             Some(s) => s,
             None => {

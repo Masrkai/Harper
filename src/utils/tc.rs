@@ -95,6 +95,11 @@ const BURST_MIN_BYTES: u64 = 1_600;
 const NFT_TABLE: &str = "harper";
 const NFT_CHAIN: &str = "FORWARD";
 
+/// Single shared fwmark used by pool mode. Every victim IP is marked with this
+/// so all their traffic funnels into one shared HTB class; unmarked traffic
+/// (the attacker) keeps the rest of LINE_RATE via the passthrough class.
+const MARK_POOL: u32 = 0xFFE;
+
 #[derive(Debug)]
 pub struct TcError {
     pub host_id: HostId,
@@ -116,10 +121,10 @@ pub enum ShapeMode {
 }
 
 #[derive(Debug, Clone)]
-struct HostSlot {
-    slot: u16,
-    ip: Ipv4Addr,
-    mode: ShapeMode,
+pub struct HostSlot {
+    pub slot: u16,
+    pub ip: Ipv4Addr,
+    pub mode: ShapeMode,
 }
 
 pub struct TcManager {
@@ -284,6 +289,35 @@ impl TcManager {
             }
         }
         errors
+    }
+
+    /// Pool mode: every victim shares ONE HTB class of `pool_kbps` on both the
+    /// upload (egress) and download (ifb0) trees. All victim IPs are marked
+    /// with the single shared `MARK_POOL` fwmark so their traffic funnels into
+    /// that class; unmarked traffic (the attacker) keeps the rest of
+    /// `LINE_RATE` via the passthrough default class.
+    pub async fn limit_pool(
+        &mut self,
+        pool_kbps: u64,
+        victim_ips: &[Ipv4Addr],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.ensure_init().await?;
+
+        let slot = MARK_POOL as u16;
+        // Recreate the shared class idempotently.
+        self.remove_htb_leaf(slot).await;
+        self.add_htb_leaf(slot, pool_kbps).await?;
+
+        let rules = build_nft_pool_rules(victim_ips);
+        let _ = nft_run(&["flush", "chain", "ip", NFT_TABLE, NFT_CHAIN]).await;
+        nft_apply(&ruleset_for(&rules)).await?;
+
+        println!(
+            "[+] tc: {} victim(s) share a {} kbit pool (attacker keeps the rest).",
+            victim_ips.len(),
+            pool_kbps
+        );
+        Ok(())
     }
 
     pub fn is_shaping(&self, host_id: HostId) -> bool {
@@ -627,57 +661,80 @@ impl TcManager {
     }
 
     async fn nft_rebuild_chain(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let mut rules = String::new();
-
-        for slot_info in self.hosts.values() {
-            let ip = slot_info.ip.to_string();
-            let mark = slot_info.slot as u32;
-
-            match slot_info.mode {
-                ShapeMode::Limited(_) => {
-                    // Upload:   mark packet + save to conntrack entry.
-                    // Download: restore mark from conntrack.
-                    //           The catch-all ingress redirect already ran
-                    //           "action connmark" on the skb, but that only
-                    //           works if the ct entry had a mark saved from a
-                    //           previous upload packet.  For new connections
-                    //           (first packet is a download SYN-ACK) the
-                    //           ct mark may be 0, so we set it here on daddr.
-                    rules.push_str(&format!(
-                        "\t\tip saddr {ip} meta mark set {mark} ct mark set meta mark\n\
-                         \t\tip daddr {ip} ct mark != 0 meta mark set ct mark\n\
-                         \t\tip daddr {ip} ct mark == 0 meta mark set {mark} ct mark set meta mark\n"
-                    ));
-                }
-                ShapeMode::Blocked => {
-                    rules.push_str(&format!(
-                        "\t\tip saddr {ip} drop\n\
-                         \t\tip daddr {ip} drop\n"
-                    ));
-                }
-            }
-        }
-
+        let rules = build_nft_rules(&self.hosts);
         let _ = nft_run(&["flush", "chain", "ip", NFT_TABLE, NFT_CHAIN]).await;
-
-        let ruleset = format!(
-            "table ip {table} {{\n\
-             \tchain {chain} {{\n\
-             \t\ttype filter hook forward priority mangle; policy accept;\n\
-             {rules}\
-             \t}}\n\
-             }}",
-            table = NFT_TABLE,
-            chain = NFT_CHAIN,
-            rules = rules,
-        );
-
-        nft_apply(&ruleset).await
+        nft_apply(&ruleset_for(&rules)).await
     }
 
     async fn teardown_nft(&self) {
         let _ = nft_run(&["delete", "table", "ip", NFT_TABLE]).await;
     }
+}
+
+/// Builds the nftables FORWARD-chain rule body for per-host shaping. Pure and
+/// testable — no external commands. `hosts` maps each HostId to its slot/mode.
+pub(crate) fn build_nft_rules(hosts: &HashMap<HostId, HostSlot>) -> String {
+    let mut rules = String::new();
+
+    for slot_info in hosts.values() {
+        let ip = slot_info.ip.to_string();
+        let mark = slot_info.slot as u32;
+
+        match slot_info.mode {
+            ShapeMode::Limited(_) => {
+                // Upload:   mark packet + save to conntrack entry.
+                // Download: restore mark from conntrack, or set it on the
+                // first download packet (ct mark 0) so it reaches the class.
+                rules.push_str(&format!(
+                    "\t\tip saddr {ip} meta mark set {mark} ct mark set meta mark\n\
+                     \t\tip daddr {ip} ct mark != 0 meta mark set ct mark\n\
+                     \t\tip daddr {ip} ct mark == 0 meta mark set {mark} ct mark set meta mark\n"
+                ));
+            }
+            ShapeMode::Blocked => {
+                rules.push_str(&format!(
+                    "\t\tip saddr {ip} drop\n\
+                     \t\tip daddr {ip} drop\n"
+                ));
+            }
+        }
+    }
+
+    rules
+}
+
+/// Builds the nftables FORWARD-chain rule body for pool mode: every victim IP
+/// is marked with the single shared `MARK_POOL` so all its traffic funnels
+/// into one shared HTB class. Pure and testable.
+pub(crate) fn build_nft_pool_rules(victim_ips: &[Ipv4Addr]) -> String {
+    let mut rules = String::new();
+    let mark = MARK_POOL;
+
+    for ip in victim_ips {
+        let ip = ip.to_string();
+        rules.push_str(&format!(
+            "\t\tip saddr {ip} meta mark set {mark} ct mark set meta mark\n\
+             \t\tip daddr {ip} ct mark != 0 meta mark set ct mark\n\
+             \t\tip daddr {ip} ct mark == 0 meta mark set {mark} ct mark set meta mark\n"
+        ));
+    }
+
+    rules
+}
+
+/// Wraps a rule body in a complete nftables table/chain ruleset string.
+fn ruleset_for(rules: &str) -> String {
+    format!(
+        "table ip {table} {{\n\
+         \tchain {chain} {{\n\
+         \t\ttype filter hook forward priority mangle; policy accept;\n\
+         {rules}\
+         \t}}\n\
+         }}",
+        table = NFT_TABLE,
+        chain = NFT_CHAIN,
+        rules = rules,
+    )
 }
 
 pub(crate) fn burst_for(kbps: u64) -> String {
@@ -868,6 +925,56 @@ mod tests {
         assert_eq!(ShapeMode::Limited(100), ShapeMode::Limited(100));
         assert_ne!(ShapeMode::Limited(100), ShapeMode::Limited(200));
         assert_ne!(ShapeMode::Limited(100), ShapeMode::Blocked);
+    }
+
+    #[test]
+    fn test_build_nft_rules_per_host_mark() {
+        let mut hosts = HashMap::new();
+        hosts.insert(
+            1,
+            HostSlot {
+                slot: 7,
+                ip: Ipv4Addr::new(10, 0, 0, 5),
+                mode: ShapeMode::Limited(2_048),
+            },
+        );
+        let rules = build_nft_rules(&hosts);
+        // Upload mark + two download rules, all using the slot (7) as the mark.
+        assert!(rules.contains("ip saddr 10.0.0.5 meta mark set 7"));
+        assert!(rules.contains("ip daddr 10.0.0.5 ct mark == 0 meta mark set 7"));
+        assert!(ruleset_for(&rules).contains("type filter hook forward priority mangle"));
+    }
+
+    #[test]
+    fn test_build_nft_rules_blocked_drops() {
+        let mut hosts = HashMap::new();
+        hosts.insert(
+            1,
+            HostSlot {
+                slot: 9,
+                ip: Ipv4Addr::new(10, 0, 0, 9),
+                mode: ShapeMode::Blocked,
+            },
+        );
+        let rules = build_nft_rules(&hosts);
+        assert!(rules.contains("ip saddr 10.0.0.9 drop"));
+        assert!(rules.contains("ip daddr 10.0.0.9 drop"));
+    }
+
+    #[test]
+    fn test_build_nft_pool_rules_single_shared_mark() {
+        let victims = vec![
+            Ipv4Addr::new(10, 0, 0, 5),
+            Ipv4Addr::new(10, 0, 0, 6),
+        ];
+        let rules = build_nft_pool_rules(&victims);
+        // Both victims marked with the SAME shared mark (MARK_POOL = 0xFFE = 4094).
+        assert!(rules.contains("ip saddr 10.0.0.5 meta mark set 4094"));
+        assert!(rules.contains("ip saddr 10.0.0.6 meta mark set 4094"));
+        assert!(rules.contains("ip daddr 10.0.0.5 ct mark == 0 meta mark set 4094"));
+        assert!(rules.contains("ip daddr 10.0.0.6 ct mark == 0 meta mark set 4094"));
+        // No per-host slot numbers — every line uses 4094.
+        assert!(!rules.contains("meta mark set 7"));
     }
 
     #[tokio::test]

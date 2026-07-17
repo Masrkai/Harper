@@ -7,6 +7,8 @@
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
+use pnet::util::MacAddr;
+
 use tokio::sync::RwLock;
 
 use crate::cli::color::palette;
@@ -28,6 +30,9 @@ pub struct GatewayModeConfig {
     pub interface:      Option<String>,
     pub bandwidth_kbps: Option<u64>,
     pub targets:        Vec<String>,
+    pub all:            bool,
+    pub pool_kbps:      Option<u64>,
+    pub uplink:         Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -135,10 +140,37 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
         return Ok(());
     }
 
+    // ── Resolve uplink exclusion ──────────────────────────────────────────────
+    // `--uplink` names the bottleneck device to keep OUT of the victim pool
+    // (e.g. a repeater whose airtime is the real constraint). Falls back to
+    // excluding ourselves when it can't be resolved.
+    let excluded_ip = {
+        let t = host_table.read().await;
+        resolve_uplink(&t, &cfg.uplink, our_ip)
+    };
+    if cfg.uplink.is_some() {
+        if excluded_ip == our_ip {
+            logger.error_fmt(format_args!(
+                "Could not resolve --uplink {:?} to a known host; falling back to excluding self.",
+                cfg.uplink.as_deref().unwrap()
+            ));
+        } else {
+            logger.info_fmt(format_args!(
+                "Excluding uplink {} from victims.", excluded_ip
+            ));
+        }
+    }
+
     // ── Target + bandwidth selection ─────────────────────────────────────────
     // All stdin interaction must finish here, BEFORE spawn_shutdown_listener().
     let selection: SelectionResult = if bypass_mode {
-        let ids: Vec<_> = host_table.read().await.iter().map(|e| e.id).collect();
+        let ids: Vec<_> = host_table
+            .read()
+            .await
+            .iter()
+            .filter(|e| e.host.ip != excluded_ip)
+            .map(|e| e.id)
+            .collect();
         if ids.is_empty() {
             logger.error_fmt(format_args!("No targets after resolution."));
             return Ok(());
@@ -154,9 +186,32 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
         };
 
         SelectionResult { host_ids: ids, bandwidth_kbps: kbps }
+    } else if cfg.all {
+        let ids: Vec<_> = host_table
+            .read()
+            .await
+            .iter()
+            .filter(|e| e.host.ip != excluded_ip)
+            .map(|e| e.id)
+            .collect();
+        if ids.is_empty() {
+            logger.error_fmt(format_args!("No clients to shape."));
+            return Ok(());
+        }
+        logger.info_fmt(format_args!("Auto-select (--all): {} target(s).", ids.len()));
+
+        let kbps = match cfg.bandwidth_kbps {
+            Some(k) => {
+                logger.info_fmt(format_args!("Bandwidth (from args): {} kbps", k));
+                Some(k)
+            }
+            None => prompt_bandwidth_once(),
+        };
+
+        SelectionResult { host_ids: ids, bandwidth_kbps: kbps }
     } else {
         let t = host_table.read().await;
-        match TargetSelector::select(&t, our_ip) {
+        match TargetSelector::select(&t, excluded_ip) {
             Some(mut s) => {
                 if let Some(k) = cfg.bandwidth_kbps {
                     s.bandwidth_kbps = Some(k);
@@ -197,7 +252,40 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
         )),
     }
 
-    if kbps > 0 {
+    // Pool mode: all selected victims share ONE HTB class of `pool_kbps`.
+    // Unshaped traffic (the attacker) keeps the rest of the line rate via the
+    // passthrough default class. Mutually exclusive with per-host --bandwidth.
+    if let Some(pool_kbps) = cfg.pool_kbps {
+        if pool_kbps == 0 {
+            logger.error_fmt(format_args!(
+                "--pool must be a positive kbps value (got 0)."
+            ));
+            return Ok(());
+        }
+        if kbps > 0 && cfg.bandwidth_kbps.is_some() {
+            logger.error_fmt(format_args!(
+                "--pool and --bandwidth are mutually exclusive; using --pool (shared)."
+            ));
+        }
+        let table = host_table.read().await;
+        let victim_ips: Vec<Ipv4Addr> = selection
+            .host_ids
+            .iter()
+            .filter_map(|&id| table.get_by_id(id).map(|e| e.host.ip))
+            .collect();
+        if victim_ips.is_empty() {
+            logger.error_fmt(format_args!("No victims to pool."));
+            return Ok(());
+        }
+        match tc.limit_pool(pool_kbps, &victim_ips).await {
+            Ok(()) => logger.info_fmt(format_args!(
+                "tc: {} client(s) share a {} kbps pool; attacker keeps the rest.",
+                victim_ips.len(),
+                palette::WARN.paint(&pool_kbps.to_string()),
+            )),
+            Err(e) => logger.error_fmt(format_args!("tc limit_pool failed: {e}")),
+        }
+    } else if kbps > 0 {
         let table = host_table.read().await;
         for &id in &selection.host_ids {
             if let Some(entry) = table.get_by_id(id) {
@@ -260,6 +348,57 @@ fn prompt_bandwidth_once() -> Option<u64> {
     None
 }
 
+/// Resolves `--uplink <ip|mac>` to the IP of the device to exclude from
+/// shaping. Falls back to `our_ip` when the hint is absent or cannot be
+/// resolved to a known host (so behaviour degrades to excluding ourselves,
+/// i.e. shaping everyone else).
+pub(crate) fn resolve_uplink(
+    table: &HostTable,
+    uplink: &Option<String>,
+    our_ip: Ipv4Addr,
+) -> Ipv4Addr {
+    let Some(hint) = uplink else {
+        return our_ip;
+    };
+
+    // Try IPv4 first.
+    if let Ok(ip) = hint.parse::<Ipv4Addr>() {
+        if table.get_by_ip(ip).is_some() {
+            return ip;
+        }
+        // Unknown IP — fall back to self exclusion rather than shaping blindly.
+        return our_ip;
+    }
+
+    // Try MAC (colon-separated).
+    if let Some(mac) = parse_mac(hint) {
+        if let Some(entry) = table.get_by_mac(mac) {
+            return entry.host.ip;
+        }
+    }
+
+    our_ip
+}
+
+/// Parses a colon-separated MAC ("00:11:22:33:44:55") into `MacAddr`.
+fn parse_mac(s: &str) -> Option<MacAddr> {
+    let mut octets = [0u8; 6];
+    let mut i = 0;
+    for part in s.split(':') {
+        if i >= 6 {
+            return None;
+        }
+        octets[i] = u8::from_str_radix(part, 16).ok()?;
+        i += 1;
+    }
+    if i != 6 {
+        return None;
+    }
+    Some(MacAddr::new(
+        octets[0], octets[1], octets[2], octets[3], octets[4], octets[5],
+    ))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -272,13 +411,23 @@ mod tests {
             interface:      Some("eth0".to_string()),
             bandwidth_kbps: Some(1024),
             targets:        vec!["10.0.0.1".to_string()],
+            all:            false,
+            pool_kbps:      None,
+            uplink:         None,
         };
         assert_eq!(cfg.interface.as_deref(), Some("eth0"));
         assert_eq!(cfg.bandwidth_kbps, Some(1024));
         assert_eq!(cfg.targets.len(), 1);
 
         // Empty targets → full scan path
-        let empty = GatewayModeConfig { interface: None, bandwidth_kbps: None, targets: vec![] };
+        let empty = GatewayModeConfig {
+            interface:      None,
+            bandwidth_kbps: None,
+            targets:        vec![],
+            all:            false,
+            pool_kbps:      None,
+            uplink:         None,
+        };
         assert!(empty.targets.is_empty());
     }
 
@@ -294,5 +443,50 @@ mod tests {
         assert_eq!(ips[2], "10.0.0.3".parse::<Ipv4Addr>().unwrap());
 
         assert!(expand_targets(&["not_an_ip".to_string()]).is_err());
+    }
+
+    #[test]
+    fn test_resolve_uplink_ip_mac_and_fallback() {
+        use crate::host::table::DiscoveredHost;
+        use pnet::util::MacAddr;
+        use std::time::Instant;
+
+        let mut table = HostTable::new();
+        table.insert(DiscoveredHost {
+            ip: Ipv4Addr::new(10, 0, 0, 1),
+            mac: MacAddr::new(0xAA, 0xBB, 0xCC, 0x00, 0x00, 0x01),
+            hostname: None,
+            vendor: None,
+            last_seen: Instant::now(),
+        });
+        // Re-index so IP/MAC lookups are populated.
+        table.reindex_by_ip();
+
+        let our_ip = Ipv4Addr::new(192, 168, 1, 100);
+
+        // No hint → exclude self.
+        assert_eq!(resolve_uplink(&table, &None, our_ip), our_ip);
+
+        // Resolve by IP.
+        assert_eq!(
+            resolve_uplink(&table, &Some("10.0.0.1".to_string()), our_ip),
+            Ipv4Addr::new(10, 0, 0, 1)
+        );
+
+        // Resolve by MAC.
+        assert_eq!(
+            resolve_uplink(&table, &Some("AA:BB:CC:00:00:01".to_string()), our_ip),
+            Ipv4Addr::new(10, 0, 0, 1)
+        );
+
+        // Unresolvable hint → fall back to self exclusion.
+        assert_eq!(
+            resolve_uplink(&table, &Some("10.9.9.9".to_string()), our_ip),
+            our_ip
+        );
+        assert_eq!(
+            resolve_uplink(&table, &Some("ZZ:ZZ:ZZ:ZZ:ZZ:ZZ".to_string()), our_ip),
+            our_ip
+        );
     }
 }
