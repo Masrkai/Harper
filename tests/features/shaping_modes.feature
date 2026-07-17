@@ -12,6 +12,16 @@ Feature: Gateway shaping modes
     Then one shared class of 500 kbps is created for all victims
     And the attacker keeps the rest of the line rate
 
+  Scenario: MITM mode applies pool across selected victims excluding the gateway
+    Given the discovered hosts
+      | ip          | mac               | is_gateway |
+      | 192.168.1.1 | AA:BB:CC:00:00:01 | true       |
+      | 192.168.1.5 | AA:BB:CC:00:00:02 | false      |
+      | 192.168.1.6 | AA:BB:CC:00:00:03 | false      |
+    When MITM pool mode is applied with 1000 kbps
+    Then one shared class of 1000 kbps is created for 192.168.1.5 and 192.168.1.6
+    And the gateway 192.168.1.1 is not pooled
+
   Scenario: Uplink exclusion removes the bottleneck device from victims
     Given a known host with ip 10.0.0.1 and mac AA:BB:CC:00:00:01
     And the candidate victim pool contains 10.0.0.1 and 10.0.0.2

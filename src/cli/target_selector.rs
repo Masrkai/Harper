@@ -31,6 +31,17 @@ pub struct TargetSelector;
 
 impl TargetSelector {
     pub fn select(table: &HostTable, gateway_ip: Ipv4Addr) -> Option<SelectionResult> {
+        Self::select_with(table, gateway_ip, false)
+    }
+
+    /// Interactive target selection. When `skip_bandwidth` is true the
+    /// per-host bandwidth prompt is suppressed (e.g. when `--pool` is given,
+    /// which supersedes per-host bandwidth).
+    pub fn select_with(
+        table: &HostTable,
+        gateway_ip: Ipv4Addr,
+        skip_bandwidth: bool,
+    ) -> Option<SelectionResult> {
         let gateway_id = table.get_by_ip(gateway_ip).map(|e| e.id);
 
         let mut available: Vec<HostId> = table
@@ -127,7 +138,11 @@ impl TargetSelector {
             }
         }
 
-        let bandwidth_kbps = Self::prompt_bandwidth();
+        let bandwidth_kbps = if skip_bandwidth {
+            None
+        } else {
+            Self::prompt_bandwidth()
+        };
 
         Some(SelectionResult {
             host_ids,

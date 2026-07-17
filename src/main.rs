@@ -88,7 +88,7 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     all: bool,
 
-    /// Gateway mode: shared bandwidth pool in kbps.
+    /// Gateway/MITM mode: shared bandwidth pool in kbps.
     /// All shaped clients share ONE HTB class of this size; unshaped traffic
     /// (the attacker) keeps the rest of the line rate. Mutually exclusive with
     /// --bandwidth (--pool wins if both are given).
@@ -412,7 +412,12 @@ fn parse_mac(s: &str) -> Option<MacAddr> {
         }
         logger.info_fmt(format_args!("Bypass: {} target(s).", ids.len()));
 
-        let bandwidth_kbps = resolve_bandwidth(cli.bandwidth, &mut logger);
+        // `--pool` overrides per-host bandwidth; skip the interactive prompt.
+        let bandwidth_kbps = if cli.pool.is_some() {
+            None
+        } else {
+            resolve_bandwidth(cli.bandwidth, &mut logger)
+        };
 
         cli::target_selector::SelectionResult {
             host_ids: ids,
@@ -422,7 +427,7 @@ fn parse_mac(s: &str) -> Option<MacAddr> {
         // Interactive path with TargetSelector
         match {
             let t = host_table.read().await;
-            TargetSelector::select(&t, excluded_ip) // ← Prompts user; excludes uplink/gateway
+            TargetSelector::select_with(&t, excluded_ip, cli.pool.is_some()) // ← Prompts user; excludes uplink/gateway; skips bandwidth prompt if --pool given
         } {
             Some(s) => s,
             None => {
@@ -460,7 +465,57 @@ fn parse_mac(s: &str) -> Option<MacAddr> {
     // ── tc bandwidth shaping ─────────────────────────────────────────────────
     let mut tc = TcManager::new(&interface_name);
 
-    if let Some(kbps) = selection.bandwidth_kbps {
+    // Pool mode: all selected victims share ONE HTB class of `pool_kbps`.
+    // Unshaped traffic (the attacker) keeps the rest of the line rate via the
+    // passthrough default class. Mutually exclusive with per-host --bandwidth;
+    // pool wins when both are given (mirrors gateway-mode behaviour).
+    if let Some(pool_kbps) = cli.pool {
+        if pool_kbps == 0 {
+            logger.error_fmt(format_args!(
+                "--pool must be a positive kbps value (got 0)."
+            ));
+            shutdown_manager.shutdown().await;
+            std::process::exit(1);
+        }
+        if selection.bandwidth_kbps.is_some() {
+            logger.error_fmt(format_args!(
+                "--pool and --bandwidth are mutually exclusive; using --pool (shared)."
+            ));
+        }
+        match tc.init().await {
+            Err(e) => {
+                logger.error_fmt(format_args!("tc init failed: {e}"));
+                shutdown_manager.shutdown().await;
+                std::process::exit(1);
+            }
+            Ok(()) => {
+                logger.info_fmt(format_args!(
+                    "tc: HTB + IFB shaping initialised on {}.",
+                    interface_name
+                ));
+
+                let table = host_table.read().await;
+                let victim_ips: Vec<Ipv4Addr> = selection
+                    .host_ids
+                    .iter()
+                    .filter_map(|&id| table.get_by_id(id).map(|e| e.host.ip))
+                    .collect();
+                if victim_ips.is_empty() {
+                    logger.error_fmt(format_args!("No victims to pool."));
+                    shutdown_manager.shutdown().await;
+                    std::process::exit(1);
+                }
+                match tc.limit_pool(pool_kbps, &victim_ips).await {
+                    Ok(()) => logger.info_fmt(format_args!(
+                        "tc: {} client(s) share a {} kbps pool; attacker keeps the rest.",
+                        victim_ips.len(),
+                        palette::WARN.paint(&pool_kbps.to_string()),
+                    )),
+                    Err(e) => logger.error_fmt(format_args!("tc limit_pool failed: {e}")),
+                }
+            }
+        }
+    } else if let Some(kbps) = selection.bandwidth_kbps {
         match tc.init().await {
             Err(e) => {
                 logger.error_fmt(format_args!("tc init failed: {e}"));

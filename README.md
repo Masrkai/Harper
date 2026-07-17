@@ -55,14 +55,14 @@ sudo cargo test -- --ignored
 
 ### Common options
 
-| Option | Description |
-|--------|-------------|
-| `-i, --interface <IFACE>` | Network interface to use (auto-selected if omitted) |
-| `-g, --gateway <IP>` | Gateway IP (MITM mode only, auto-detected if omitted) |
-| `-t, --target <IP\|CIDR\|RANGE>` | Target IP(s) — skips full scan (can repeat) |
-| `-b, --bandwidth <KBPS>` | Bandwidth cap per host (omit = unlimited) |
-| `--one-sided` | Use gratuitous ARP takeover instead of bidirectional poisoning |
-| `--uplink <IP\|MAC>` | Explicitly name the bottleneck uplink device to exclude from shaping |
+| Option                           | Description                                                          |
+|----------------------------------|----------------------------------------------------------------------|
+| `-i, --interface <IFACE>`        | Network interface to use (auto-selected if omitted)                  |
+| `-g, --gateway <IP>`             | Gateway IP (MITM mode only, auto-detected if omitted)                |
+| `-t, --target <IP\|CIDR\|RANGE>` | Target IP(s) — skips full scan (can repeat)                          |
+| `-b, --bandwidth <KBPS>`         | Bandwidth cap per host (omit = unlimited)                            |
+| `--one-sided`                    | Use gratuitous ARP takeover instead of bidirectional poisoning       |
+| `--uplink <IP\|MAC>`             | Explicitly name the bottleneck uplink device to exclude from shaping |
 
 ### MITM mode (default)
 
@@ -102,26 +102,26 @@ sudo harper --gateway-mode --all --uplink AA:BB:CC:DD:EE:FF
 
 ### Key differences between modes
 
-| Aspect | MITM mode | Gateway mode |
-|--------|-----------|--------------|
-| ARP spoofing | Yes (bidirectional or one-sided) | No |
-| Requires being gateway | No | Yes |
-| Target discovery | ARP scan + passive sniff | Kernel ARP cache (instant) + scan fallback |
-| `--target` | Skips scan, resolves only those IPs | Same; skips cache lookup |
-| `--all` | N/A | Shape every discovered client |
-| `--pool` | N/A | Shared bandwidth class for all victims |
-| `--uplink` | Excludes from poisoning | Excludes from victim pool |
+| Aspect                 | MITM mode                           | Gateway mode                               |
+|------------------------|-------------------------------------|--------------------------------------------|
+| ARP spoofing           | Yes (bidirectional or one-sided)    | No                                         |
+| Requires being gateway | No                                  | Yes                                        |
+| Target discovery       | ARP scan + passive sniff            | Kernel ARP cache (instant) + scan fallback |
+| `--target`             | Skips scan, resolves only those IPs | Same; skips cache lookup                   |
+| `--all`                | N/A                                 | Shape every discovered client              |
+| `--pool`               | N/A                                 | Shared bandwidth class for all victims     |
+| `--uplink`             | Excludes from poisoning             | Excludes from victim pool                  |
 
 ---
 
 ## Target specification formats
 
-| Format | Example | Expands to |
-|--------|---------|------------|
-| Single IP | `192.168.1.10` | 192.168.1.10 |
-| CIDR | `10.0.0.0/24` | 10.0.0.1 – 10.0.0.254 |
-| Last-octet range | `192.168.1.10-20` | 192.168.1.10 – 192.168.1.20 |
-| Multiple | `-t 10.0.0.1 -t 10.0.0.5-10` | Combined, deduped, sorted |
+| Format           | Example                      | Expands to                  |
+|------------------|------------------------------|-----------------------------|
+| Single IP        | `192.168.1.10`               | 192.168.1.10                |
+| CIDR             | `10.0.0.0/24`                | 10.0.0.1 – 10.0.0.254       |
+| Last-octet range | `192.168.1.10-20`            | 192.168.1.10 – 192.168.1.20 |
+| Multiple         | `-t 10.0.0.1 -t 10.0.0.5-10` | Combined, deduped, sorted   |
 
 ---
 
@@ -146,6 +146,7 @@ Select target(s) [1-3] or 'q' to quit:
 ```
 
 **Input formats:**
+
 - `3` — single host
 - `1-5` — inclusive range (skips unavailable IDs)
 - `1,3,5` — comma-separated list (deduped, sorted)
@@ -158,6 +159,7 @@ Then you'll be prompted for bandwidth (blank = unlimited).
 ## Shutdown & cleanup
 
 Press `Ctrl-C` or `q` + `Enter` at any time. harper will:
+
 1. Stop packet forwarding
 2. Stop ARP poisoning
 3. Send ARP restore packets (600 ms per host) to fix victim caches

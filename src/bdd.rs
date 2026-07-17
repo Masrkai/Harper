@@ -398,6 +398,57 @@ fn bdd_shaping_pool_mode_shares_one_class_across_all_victims() {
 }
 
 #[test]
+fn bdd_shaping_mitm_pool_applies_across_selected_victims_excluding_gateway() {
+    use std::net::Ipv4Addr;
+
+    let feat = load_feature("shaping_modes");
+    let sc = scenario_by_name(
+        &feat,
+        "MITM mode applies pool across selected victims excluding the gateway",
+    );
+
+    // Discovered hosts: gateway + two victims (mirrors main.rs host_table).
+    let mut table = host_table_from(&[
+        ("192.168.1.1", "AA:BB:CC:00:00:01"),
+        ("192.168.1.5", "AA:BB:CC:00:00:02"),
+        ("192.168.1.6", "AA:BB:CC:00:00:03"),
+    ]);
+
+    let gateway_ip: Ipv4Addr = "192.168.1.1".parse().unwrap();
+    // MITM selection excludes the gateway/uplink (resolve_uplink → excluded_ip).
+    let excluded_ip = crate::gateway_mode::resolve_uplink(&table, &None, gateway_ip);
+    assert_eq!(excluded_ip, gateway_ip);
+
+    let selection_ids: Vec<_> = table
+        .iter()
+        .filter(|e| e.host.ip != excluded_ip)
+        .map(|e| e.id)
+        .collect();
+    assert_eq!(selection_ids.len(), 2, "gateway must be excluded from victims");
+
+    // main.rs: pool wins → derive victim IPs from selection and call limit_pool.
+    let pool_kbps = 1000u64;
+    let mut tc = FakeTc::new();
+    {
+        let victim_ips: Vec<Ipv4Addr> = selection_ids
+            .iter()
+            .filter_map(|&id| table.get_by_id(id).map(|e| e.host.ip))
+            .collect();
+        assert_eq!(victim_ips.len(), 2);
+        assert!(!victim_ips.contains(&gateway_ip), "gateway must not be pooled");
+        tc.limit_pool(pool_kbps, &victim_ips);
+    }
+
+    assert_eq!(tc.pool_calls.len(), 1);
+    let (actual_kbps, actual_victims) = &tc.pool_calls[0];
+    assert_eq!(*actual_kbps, pool_kbps);
+    assert_eq!(actual_victims.len(), 2);
+    assert!(actual_victims.contains(&Ipv4Addr::new(192, 168, 1, 5)));
+    assert!(actual_victims.contains(&Ipv4Addr::new(192, 168, 1, 6)));
+    assert!(!actual_victims.contains(&gateway_ip));
+}
+
+#[test]
 fn bdd_shaping_uplink_exclusion_by_mac() {
     use std::net::Ipv4Addr;
 
