@@ -12,7 +12,7 @@
 // independent channel (forwarder/engine.rs), and the scanner's receiver is
 // dropped after discovery, so we cannot reuse either.
 
-use crate::forwarder::{ForwardRule, ForwarderCommand};
+use crate::forwarder::{ForwarderCommand, RelayHandle};
 use crate::host::table::{DiscoveredHost, HostId, HostState, HostTable};
 use crate::scanner::engine::should_ignore_passive_frame;
 use crate::spoofer::{SpoofTarget, SpooferCommand};
@@ -50,7 +50,7 @@ pub struct MitmAutoManager {
     excluded_ip: Ipv4Addr,
     host_table: Arc<RwLock<HostTable>>,
     spoof_tx: mpsc::Sender<SpooferCommand>,
-    fwd_tx: mpsc::Sender<ForwarderCommand>,
+    relay: Arc<RelayHandle>,
     tc: TcManager,
     /// When set, all victims share ONE pool class of this size.
     pool_kbps: Option<u64>,
@@ -71,7 +71,7 @@ impl MitmAutoManager {
         excluded_ip: Ipv4Addr,
         host_table: Arc<RwLock<HostTable>>,
         spoof_tx: mpsc::Sender<SpooferCommand>,
-        fwd_tx: mpsc::Sender<ForwarderCommand>,
+        relay: Arc<RelayHandle>,
         tc: TcManager,
         pool_kbps: Option<u64>,
         per_host_kbps: Option<u64>,
@@ -85,7 +85,7 @@ impl MitmAutoManager {
             excluded_ip,
             host_table,
             spoof_tx,
-            fwd_tx,
+            relay,
             tc,
             pool_kbps,
             per_host_kbps,
@@ -202,15 +202,7 @@ impl MitmAutoManager {
         let target = SpoofTarget::new(id, ip, mac, self.gateway_ip, self.gateway_mac);
         let _ = self.spoof_tx.send(SpooferCommand::Start(target)).await;
 
-        let rule = ForwardRule {
-            host_id: id,
-            victim_ip: ip,
-            victim_mac: mac,
-            gateway_ip: self.gateway_ip,
-            gateway_mac: self.gateway_mac,
-            our_mac: self.our_mac,
-        };
-        let _ = self.fwd_tx.send(ForwarderCommand::Enable(rule)).await;
+        self.relay.enable(id, ip, mac, self.gateway_mac).await;
 
         if self.pool_kbps.is_some() {
             // Pool mode: re-apply the shared class across ALL managed victims.
@@ -261,7 +253,7 @@ impl MitmAutoManager {
         self.managed.remove(&id);
 
         let _ = self.spoof_tx.send(SpooferCommand::Stop(id)).await;
-        let _ = self.fwd_tx.send(ForwarderCommand::Disable(id)).await;
+        self.relay.disable(id).await;
 
         if self.pool_kbps.is_some() {
             self.apply_pool().await; // re-apply pool without the evicted IP
@@ -348,6 +340,7 @@ mod tests {
         // the pure state logic (host table + managed set), not real shaping.
         let (_s_tx, _s_rx) = mpsc::channel::<SpooferCommand>(1);
         let (_f_tx, _f_rx) = mpsc::channel::<ForwarderCommand>(1);
+        let relay = Arc::new(RelayHandle::Userspace(_f_tx));
         let mgr = MitmAutoManager::new(
             "eth0".into(),
             MacAddr::new(0, 0, 0, 0, 0, 0),
@@ -357,7 +350,7 @@ mod tests {
             Ipv4Addr::new(192, 168, 1, 1), // excluded = gateway
             Arc::clone(&table),
             _s_tx,
-            _f_tx,
+            relay,
             TcManager::new("eth0"),
             None, // pool off
             None, // per-host off

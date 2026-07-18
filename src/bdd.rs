@@ -32,6 +32,8 @@ use crate::spoofer::{SpoofTarget, SpooferCommand};
 use crate::utils::neighbors::parse_arp_table;
 use crate::utils::tc::{ShapeMode, TcManager};
 use crate::forwarder::ForwarderCommand;
+use crate::Cli;
+use clap::Parser;
 use tokio::sync::mpsc;
 
 /// Absolute path to `tests/features/<name>.feature`.
@@ -1076,7 +1078,7 @@ fn make_mitm_harness(pairs: &[(&str, &str)], gateway_ip: Ipv4Addr) -> MitmHarnes
         gateway_ip, // excluded = gateway
         std::sync::Arc::clone(&table),
         spoof_tx,
-        fwd_tx,
+        std::sync::Arc::new(crate::forwarder::RelayHandle::Userspace(fwd_tx)),
         TcManager::new("eth0"),
         None,
         None,
@@ -1329,4 +1331,33 @@ fn bdd_forwarder_fatal_error_not_retried() {
 
     assert_eq!(sender.call_count, 1, "fatal error attempted exactly once");
     assert_eq!(sender.sent.len(), 0, "no frame delivered on fatal error");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Kernel eBPF relay (--kernel) flag parsing + guard rails (root-free)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn bdd_kernel_flag_parses_and_defaults_off() {
+    let feat = load_feature("kernel_relay");
+    let _sc = scenario_by_name(&feat, "The --kernel flag selects the eBPF relay backend");
+
+    // Default: userspace forwarder.
+    let cli = Cli::parse_from(["harper", "--interface", "wlan0"]);
+    assert!(!cli.kernel, "--kernel must default to false");
+
+    // Explicit opt-in.
+    let cli = Cli::parse_from(["harper", "--interface", "wlan0", "--kernel"]);
+    assert!(cli.kernel, "--kernel must be enabled when passed");
+}
+
+#[test]
+fn bdd_kernel_flag_incompatible_with_gateway_mode() {
+    let feat = load_feature("kernel_relay");
+    let _sc = scenario_by_name(&feat, "--kernel is rejected alongside --gateway-mode");
+
+    // The guard in main() exits(1) when both are set; here we assert the two
+    // flags are independently parseable but mutually exclusive by contract.
+    let cli = Cli::parse_from(["harper", "--interface", "wlan0", "--kernel", "--gateway-mode"]);
+    assert!(cli.kernel && cli.gateway_mode, "both flags parse; main() enforces the guard");
 }

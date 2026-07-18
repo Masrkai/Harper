@@ -1,4 +1,4 @@
-{ lib, rustPlatform, iproute2, nftables, ... }:
+{ lib, rustPlatform, iproute2, nftables, clang, libbpf, ... }:
 
 rustPlatform.buildRustPackage {
   pname   = "harper";
@@ -10,7 +10,10 @@ rustPlatform.buildRustPackage {
     lockFile = ./Cargo.lock;
   };
 
-  nativeBuildInputs = [ iproute2 nftables ];
+  # eBPF MITM relay (--kernel mode): clang compiles the object, libbpf provides
+  # the bpf/linux headers.
+  nativeBuildInputs = [ iproute2 nftables clang libbpf ];
+  LIBBPF_INCLUDE = "${libbpf}/include";
 
 
   meta = with lib; {

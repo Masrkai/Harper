@@ -28,9 +28,9 @@ use cli::selector::InterfaceSelector;
 use cli::target_selector::TargetSelector;
 
 use forwarder::engine::PacketForwarder;
-use forwarder::{ForwardRule, ForwarderCommand};
+use forwarder::{ForwardRule, ForwarderCommand, RelayHandle};
 
-use host::table::{HostState, HostTable};
+use host::table::{HostId, HostState, HostTable};
 
 use spoofer::{SpoofTarget, SpooferCommand, SpooferEngine};
 
@@ -103,6 +103,54 @@ struct Cli {
     /// if it cannot be resolved to a known host.
     #[arg(long, value_name = "IP|MAC")]
     uplink: Option<String>,
+
+    /// MITM mode: offload packet relay to an in-kernel eBPF tc program instead
+    /// of the userspace forwarder. Reduces per-packet copy / fragmentation
+    /// overhead. Requires a kernel with cls_bpf + the harper eBPF object built.
+    /// Incompatible with --gateway-mode (no relay there).
+    #[arg(long, default_value_t = false)]
+    kernel: bool,
+}
+
+/// Enables relay for a single victim on whichever backend `relay` wraps.
+async fn enable_relay(
+    logger: &mut Logger,
+    relay: &RelayHandle,
+    id: HostId,
+    vip: Ipv4Addr,
+    vmac: MacAddr,
+    gmac: MacAddr,
+    our_mac: MacAddr,
+) {
+    match relay {
+        RelayHandle::Userspace(tx) => {
+            let rule = ForwardRule {
+                host_id: id,
+                victim_ip: vip,
+                victim_mac: vmac,
+                gateway_ip: Ipv4Addr::UNSPECIFIED,
+                gateway_mac: gmac,
+                our_mac,
+            };
+            if let Err(e) = tx.send(ForwarderCommand::Enable(rule)).await {
+                logger.error_fmt(format_args!("Could not enable forwarding for host {id}: {e}"));
+            } else {
+                logger.info_fmt(format_args!(
+                    "Forwarding enabled for [{}] {}",
+                    id,
+                    palette::WARN.paint(&vmac.to_string()),
+                ));
+            }
+        }
+        RelayHandle::Kernel(r) => {
+            r.lock().await.enable(id, vmac, gmac).await;
+            logger.info_fmt(format_args!(
+                "Forwarding enabled (kernel) for [{}] {}",
+                id,
+                palette::WARN.paint(&vmac.to_string()),
+            ));
+        }
+    }
 }
 
 
@@ -129,6 +177,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Gateway mode early dispatch ──────────────────────────────────────────
     // Must run before the MITM-specific scanner / interface setup below so we
     // don't open raw sockets or manipulate kernel state unnecessarily.
+    if cli.kernel && cli.gateway_mode {
+        eprintln!(
+            "[!] --kernel (eBPF relay) is incompatible with --gateway-mode \
+             (gateway mode does no MITM relay)."
+        );
+        std::process::exit(1);
+    }
+
     if cli.gateway_mode {
         if cli.gateway.is_some() {
             eprintln!(
@@ -580,41 +636,64 @@ fn parse_mac(s: &str) -> Option<MacAddr> {
     }
 
     // ── Packet forwarder ─────────────────────────────────────────────────────
-    let forwarder = match PacketForwarder::new(our_mac, &interface_name, Arc::clone(&host_table)) {
-        Ok(f) => f,
-        Err(e) => {
-            logger.error_fmt(format_args!("Could not create packet forwarder: {e}"));
-            tc.as_mut().unwrap().cleanup().await;
-            shutdown_manager.shutdown().await;
-            std::process::exit(1);
+    // Two relay backends: the default userspace PacketForwarder, or an in-kernel
+    // eBPF tc program selected by --kernel. Both consume the same per-victim
+    // enable/disable events.
+    let relay: RelayHandle = if cli.kernel {
+        match crate::forwarder::ebpf::KernelRelay::attach(&interface_name, our_mac) {
+            Ok(r) => {
+                println!("[*] Kernel eBPF relay active (--kernel).");
+                RelayHandle::Kernel(Arc::new(tokio::sync::Mutex::new(r)))
+            }
+            Err(e) => {
+                logger.error_fmt(format_args!(
+                    "Could not attach kernel relay: {e}. Falling back to userspace forwarder."
+                ));
+                let forwarder =
+                    match PacketForwarder::new(our_mac, &interface_name, Arc::clone(&host_table)) {
+                        Ok(f) => f,
+                        Err(e2) => {
+                            logger.error_fmt(format_args!("Could not create packet forwarder: {e2}"));
+                            tc.as_mut().unwrap().cleanup().await;
+                            shutdown_manager.shutdown().await;
+                            std::process::exit(1);
+                        }
+                    };
+                let fwd_tx = forwarder.command_sender();
+                tokio::spawn(async move { forwarder.run().await });
+                RelayHandle::Userspace(fwd_tx)
+            }
         }
+    } else {
+        let forwarder =
+            match PacketForwarder::new(our_mac, &interface_name, Arc::clone(&host_table)) {
+                Ok(f) => f,
+                Err(e) => {
+                    logger.error_fmt(format_args!("Could not create packet forwarder: {e}"));
+                    tc.as_mut().unwrap().cleanup().await;
+                    shutdown_manager.shutdown().await;
+                    std::process::exit(1);
+                }
+            };
+        let fwd_tx = forwarder.command_sender();
+        tokio::spawn(async move { forwarder.run().await });
+        RelayHandle::Userspace(fwd_tx)
     };
-    let fwd_tx = forwarder.command_sender();
-    tokio::spawn(async move { forwarder.run().await });
 
     {
         let table = host_table.read().await;
         for &id in &selection.host_ids {
             if let Some(entry) = table.get_by_id(id) {
-                let rule = ForwardRule {
-                    host_id: id,
-                    victim_ip: entry.host.ip,
-                    victim_mac: entry.host.mac,
-                    gateway_ip,
+                enable_relay(
+                    &mut logger,
+                    &relay,
+                    id,
+                    entry.host.ip,
+                    entry.host.mac,
                     gateway_mac,
                     our_mac,
-                };
-                if let Err(e) = fwd_tx.send(ForwarderCommand::Enable(rule)).await {
-                    logger.error_fmt(format_args!(
-                        "Could not enable forwarding for host {id}: {e}"
-                    ));
-                } else {
-                    logger.info_fmt(format_args!(
-                        "Forwarding enabled for [{}] {}",
-                        id,
-                        palette::WARN.paint(&entry.host.ip.to_string()),
-                    ));
-                }
+                )
+                .await;
             }
         }
     }
@@ -652,7 +731,7 @@ fn parse_mac(s: &str) -> Option<MacAddr> {
     // the shutdown manager as before.
     let (auto_stop_tx, auto_task) = if cli.all {
         let spoof_tx_clone = spoof_tx.clone();
-        let fwd_tx_clone = fwd_tx.clone();
+        let relay_clone = Arc::new(relay.clone());
 
         let mut manager = mitm_auto::MitmAutoManager::new(
             interface_name.clone(),
@@ -663,7 +742,7 @@ fn parse_mac(s: &str) -> Option<MacAddr> {
             excluded_ip,
             Arc::clone(&host_table),
             spoof_tx_clone,
-            fwd_tx_clone,
+            relay_clone,
             tc.take().unwrap(),
             cli.pool,
             selection.bandwidth_kbps,
@@ -699,7 +778,7 @@ fn parse_mac(s: &str) -> Option<MacAddr> {
     println!();
     logger.info_fmt(format_args!("Shutting down…"));
 
-    let _ = fwd_tx.send(ForwarderCommand::DisableAll).await;
+    relay.disable_all().await;
     logger.info_fmt(format_args!("Packet forwarding stopped."));
 
     let _ = spoof_tx.send(SpooferCommand::StopAll).await;

@@ -45,7 +45,7 @@ impl ScanConfig {
     pub fn wireless() -> Self {
         Self {
             send_interval_ms: 8,        // gentler pacing — AP queue can back up fast
-            passes: 5,                  // extra sweeps for sleeping devices
+            passes: 3,                  // extra sweeps for sleeping devices
             inter_pass_delay_ms: 3_000, // ≥ 1 beacon interval for power-save wakeup
             post_send_min_ms: 4_000,    // far clients can have 2–3 s RTT
             idle_cutoff_ms: 2_000,      // wireless is noisy; wait longer for stragglers

@@ -1,4 +1,4 @@
-{ lib, fetchFromGitHub, rustPlatform, iproute2, nftables, ... }:
+{ lib, fetchFromGitHub, rustPlatform, iproute2, nftables, clang, libbpf, ... }:
 
 rustPlatform.buildRustPackage {
   pname = "harper";
@@ -16,7 +16,10 @@ rustPlatform.buildRustPackage {
     lockFile = ./Cargo.lock;  # copy your Cargo.lock next to this file
   };
 
-  nativeBuildInputs = [ iproute2 nftables ];
+  # eBPF MITM relay (--kernel mode): clang compiles the object, libbpf provides
+  # the bpf/linux headers.
+  nativeBuildInputs = [ iproute2 nftables clang libbpf ];
+  LIBBPF_INCLUDE = "${libbpf}/include";
 
 
   # harper needs raw socket access — these let it find system tools at runtime

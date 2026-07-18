@@ -9,10 +9,18 @@ pkgs.mkShell {
     cargo-watch
     cargo-nextest
     cargo-llvm-cov
+
+    # eBPF MITM relay (--kernel mode): clang compiles the object, libbpf
+    # provides the bpf/linux headers the C source includes.
+    clang
+    libbpf
   ];
 
   LLVM_COV      = "${pkgs.llvmPackages_21.llvm}/bin/llvm-cov";
   LLVM_PROFDATA = "${pkgs.llvmPackages_21.llvm}/bin/llvm-profdata";
+
+  # Point the eBPF build at libbpf's headers.
+  LIBBPF_INCLUDE = "${pkgs.libbpf}/include";
 
   shellHook = ''
     alias build='cargo build --release'
