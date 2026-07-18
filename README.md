@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./shared/harper.svg" alt="Harper Logo" width="128">
+</p>
+
 # harper
 
 A network tool for bandwidth shaping and traffic management on local networks, written in Rust.
