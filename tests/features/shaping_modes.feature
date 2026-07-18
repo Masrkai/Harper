@@ -32,6 +32,17 @@ Feature: Gateway shaping modes
     Then the shared pool of 1000 kbps now covers 192.168.1.5, 192.168.1.6 and 192.168.1.7
     And the gateway 192.168.1.1 is not pooled
 
+  Scenario: MITM --all auto-selects every non-gateway host without prompting
+    Given the discovered hosts
+      | ip          | mac               | is_gateway |
+      | 192.168.1.1 | AA:BB:CC:00:00:01 | true       |
+      | 192.168.1.5 | AA:BB:CC:00:00:02 | false      |
+      | 192.168.1.6 | AA:BB:CC:00:00:03 | false      |
+    When MITM --all mode selects targets
+    Then the selected victim set is 192.168.1.5 and 192.168.1.6
+    And the gateway 192.168.1.1 is excluded from the selection
+    And no interactive target prompt is required
+
   Scenario: Uplink exclusion removes the bottleneck device from victims
     Given a known host with ip 10.0.0.1 and mac AA:BB:CC:00:00:01
     And the candidate victim pool contains 10.0.0.1 and 10.0.0.2

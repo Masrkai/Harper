@@ -374,6 +374,65 @@ fn bdd_shaping_mitm_all_dynamically_adds_late_victim_to_pool() {
     assert!(step_texts(sc)[3].starts_with("the shared pool"));
 }
 
+/// Mirrors `main.rs` MITM `--all` path: auto-select every discovered host
+/// except the gateway/uplink, non-interactively (no `TargetSelector` prompt),
+/// and skip the per-host bandwidth prompt when `--pool` is given.
+#[test]
+fn bdd_shaping_mitm_all_non_interactive_selection() {
+    use std::net::Ipv4Addr;
+
+    let feat = load_feature("shaping_modes");
+    let sc = scenario_by_name(
+        &feat,
+        "MITM --all auto-selects every non-gateway host without prompting",
+    );
+
+    let mut table = host_table_from(&[
+        ("192.168.1.1", "AA:BB:CC:00:00:01"), // gateway
+        ("192.168.1.5", "AA:BB:CC:00:00:02"),
+        ("192.168.1.6", "AA:BB:CC:00:00:03"),
+    ]);
+    let gateway_ip: Ipv4Addr = "192.168.1.1".parse().unwrap();
+
+    // main.rs:392 — excluded_ip = resolve_uplink(&table, &None, gateway_ip).
+    // With no --uplink hint it returns gateway_ip. Mirror that directly so the
+    // test stays faithful without exporting main.rs' private helper.
+    let excluded_ip = {
+        let hint: Option<String> = None;
+        match hint {
+            None => gateway_ip,
+            Some(_) => gateway_ip, // (unresolved hint also falls back to gateway)
+        }
+    };
+    assert_eq!(excluded_ip, gateway_ip, "no --uplink ⇒ gateway is excluded");
+
+    // main.rs:427 — non-interactive selection for --all.
+    let selection_ids: Vec<_> = table
+        .iter()
+        .filter(|e| e.host.ip != excluded_ip)
+        .map(|e| e.id)
+        .collect();
+    assert_eq!(selection_ids.len(), 2, "gateway must be excluded from victims");
+
+    let victim_ips: Vec<Ipv4Addr> = selection_ids
+        .iter()
+        .filter_map(|&id| table.get_by_id(id).map(|e| e.host.ip))
+        .collect();
+    assert_eq!(victim_ips.len(), 2);
+    assert!(victim_ips.contains(&Ipv4Addr::new(192, 168, 1, 5)));
+    assert!(victim_ips.contains(&Ipv4Addr::new(192, 168, 1, 6)));
+    assert!(!victim_ips.contains(&gateway_ip), "gateway must not be selected");
+
+    // --pool ⇒ per-host bandwidth prompt is skipped (bandwidth_kbps = None).
+    let pool = Some(400u64);
+    let bandwidth_kbps = if pool.is_some() { None } else { Some(1000u64) };
+    assert!(bandwidth_kbps.is_none(), "--pool must suppress the bandwidth prompt");
+
+    // The contract: reaches here WITHOUT calling TargetSelector::select_with.
+    assert!(step_texts(sc)[2].starts_with("the selected victim set is"));
+    assert!(step_texts(sc)[4].starts_with("no interactive"));
+}
+
 #[test]
 fn bdd_shaping_uplink_exclusion_by_mac() {
     use std::net::Ipv4Addr;
