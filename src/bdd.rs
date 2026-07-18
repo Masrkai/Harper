@@ -222,6 +222,10 @@ fn bdd_gateway_scan_fallback_when_the_cache_is_empty() {
 /// `tc`/`nft`. Lets behavioural scenarios assert on shaping intent with no root.
 struct FakeTc {
     pool_calls: Vec<(u64, Vec<std::net::Ipv4Addr>)>,
+    /// Counts how many times the shared pool *class* was (re)created. The real
+    /// `limit_pool` must create it exactly ONCE and only refresh rules after,
+    /// so a 2nd `limit_pool` call should NOT bump this counter.
+    class_creates: usize,
     host_calls: Vec<(crate::host::table::HostId, std::net::Ipv4Addr, u64)>,
 }
 
@@ -229,11 +233,17 @@ impl FakeTc {
     fn new() -> Self {
         Self {
             pool_calls: Vec::new(),
+            class_creates: 0,
             host_calls: Vec::new(),
         }
     }
 
+    /// Mirrors the production `limit_pool`: create the static class once, then
+    /// record every ruleset refresh (one `pool_calls` entry per call).
     fn limit_pool(&mut self, pool_kbps: u64, victim_ips: &[std::net::Ipv4Addr]) {
+        if self.class_creates == 0 {
+            self.class_creates += 1;
+        }
         self.pool_calls.push((pool_kbps, victim_ips.to_vec()));
     }
 
@@ -262,6 +272,35 @@ fn bdd_shaping_pool_mode_shares_one_class_across_all_victims() {
     assert_eq!(*actual_kbps, pool_kbps);
     assert_eq!(actual_victims.len(), victims.len());
     assert!(step_texts(sc)[3].starts_with("the attacker keeps the rest"));
+}
+
+#[test]
+fn bdd_shaping_pool_class_created_once_across_reapplies() {
+    use std::net::Ipv4Addr;
+
+    let feat = load_feature("shaping_modes");
+    let sc = scenario_by_name(
+        &feat,
+        "Pool mode creates the shared class once and only refreshes rules on re-apply",
+    );
+
+    let pool_kbps = 500u64;
+
+    let mut tc = FakeTc::new();
+    // First apply: creates the class + records a ruleset refresh.
+    let initial: Vec<Ipv4Addr> = vec!["10.0.0.5".parse().unwrap()];
+    tc.limit_pool(pool_kbps, &initial);
+    // Re-apply (e.g. a new victim joined in --all mode): must NOT recreate the class.
+    let updated: Vec<Ipv4Addr> = vec!["10.0.0.5".parse().unwrap(), "10.0.0.6".parse().unwrap()];
+    tc.limit_pool(pool_kbps, &updated);
+
+    // The shared class is created exactly once — this is the regression guard
+    // against the old `remove_htb_leaf`+`add_htb_leaf` loop that produced
+    // `RTNETLINK answers: File exists` on every re-apply.
+    assert_eq!(tc.class_creates, 1, "pool class must be created exactly once");
+    assert_eq!(tc.pool_calls.len(), 2, "ruleset refreshed on each apply");
+    assert!(step_texts(sc)[3].starts_with("the shared class is created exactly once"));
+    assert!(step_texts(sc)[4].starts_with("the pool ruleset is refreshed twice"));
 }
 
 #[test]

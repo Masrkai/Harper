@@ -12,6 +12,15 @@ Feature: Gateway shaping modes
     Then one shared class of 500 kbps is created for all victims
     And the attacker keeps the rest of the line rate
 
+  Scenario: Pool mode creates the shared class once and only refreshes rules on re-apply
+    Given the selected victim IPs
+      | ip          |
+      | 10.0.0.5    |
+    When pool mode is applied with 500 kbps
+    And pool mode is re-applied for 10.0.0.5 and 10.0.0.6
+    Then the shared class is created exactly once
+    And the pool ruleset is refreshed twice
+
   Scenario: MITM mode applies pool across selected victims excluding the gateway
     Given the discovered hosts
       | ip          | mac               | is_gateway |

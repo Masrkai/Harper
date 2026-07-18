@@ -132,6 +132,9 @@ pub struct TcManager {
     initialized: bool,
     hosts: HashMap<HostId, HostSlot>,
     next_slot: u16,
+    /// Pool mode uses one static HTB class (`MARK_POOL`). It is created once and
+    /// only the nftables ruleset is refreshed thereafter; never recreated.
+    pool_class_created: bool,
 }
 
 impl TcManager {
@@ -141,6 +144,7 @@ impl TcManager {
             initialized: false,
             hosts: HashMap::new(),
             next_slot: SLOT_MIN,
+            pool_class_created: false,
         }
     }
 
@@ -296,6 +300,13 @@ impl TcManager {
     /// with the single shared `MARK_POOL` fwmark so their traffic funnels into
     /// that class; unmarked traffic (the attacker) keeps the rest of
     /// `LINE_RATE` via the passthrough default class.
+    ///
+    /// The HTB class + fw filters are **static** (same rate, same mark), so the
+    /// class is created exactly once. Re-applying the pool — which happens on
+    /// every victim add/evict in `--all` mode — only refreshes the nftables
+    /// ruleset that decides *which* IPs carry the mark. This avoids the prior
+    /// bug where the class was deleted+recreated each call and the kernel
+    /// rejected the recreate with `RTNETLINK answers: File exists`.
     pub async fn limit_pool(
         &mut self,
         pool_kbps: u64,
@@ -304,9 +315,18 @@ impl TcManager {
         self.ensure_init().await?;
 
         let slot = MARK_POOL as u16;
-        // Recreate the shared class idempotently.
-        self.remove_htb_leaf(slot).await;
-        self.add_htb_leaf(slot, pool_kbps).await?;
+
+        // Create the shared class once. `File exists` is treated as success so a
+        // stale class from a previous run (or a prior call) does not trip us up.
+        if !self.pool_class_created {
+            match self.add_htb_leaf(slot, pool_kbps).await {
+                Ok(()) => self.pool_class_created = true,
+                Err(e) if e.to_string().contains("File exists") => {
+                    self.pool_class_created = true;
+                }
+                Err(e) => return Err(e),
+            }
+        }
 
         let rules = build_nft_pool_rules(victim_ips);
         let _ = nft_run(&["flush", "chain", "ip", NFT_TABLE, NFT_CHAIN]).await;
@@ -339,6 +359,7 @@ impl TcManager {
         self.teardown_nft().await;
         self.hosts.clear();
         self.initialized = false;
+        self.pool_class_created = false;
         println!("[+] tc: cleanup complete — network state restored");
     }
 }
