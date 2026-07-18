@@ -1,5 +1,5 @@
-use std::net::Ipv4Addr;
 use pnet::datalink::NetworkInterface;
+use std::net::Ipv4Addr;
 
 pub fn get_interface(name: &str) -> Option<NetworkInterface> {
     pnet::datalink::interfaces()

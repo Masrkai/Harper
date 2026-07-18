@@ -30,7 +30,8 @@ impl MockSender {
 
     pub fn fail_with_enobufs(mut self, n: usize) -> Self {
         for _ in 0..n {
-            self.inject_errors.push_back(io::Error::from_raw_os_error(105));
+            self.inject_errors
+                .push_back(io::Error::from_raw_os_error(105));
         }
         self
     }
@@ -53,11 +54,7 @@ impl MockSender {
 }
 
 impl DataLinkSender for MockSender {
-    fn send_to(
-        &mut self,
-        packet: &[u8],
-        _dst: Option<NetworkInterface>,
-    ) -> Option<io::Result<()>> {
+    fn send_to(&mut self, packet: &[u8], _dst: Option<NetworkInterface>) -> Option<io::Result<()>> {
         self.call_count += 1;
         if let Some(err) = self.inject_errors.pop_front() {
             return Some(Err(err));

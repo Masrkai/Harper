@@ -106,10 +106,10 @@ mod tests {
     fn test_valid_selections() {
         // (input, count, expected_index)
         let cases = [
-            ("1", 3, 0),  // first item
-            ("3", 3, 2),  // last item
-            ("2", 5, 1),  // middle item
-            ("1", 1, 0),  // single interface
+            ("1", 3, 0), // first item
+            ("3", 3, 2), // last item
+            ("2", 5, 1), // middle item
+            ("1", 1, 0), // single interface
         ];
         for (input, count, expected) in cases {
             assert_eq!(
@@ -137,20 +137,20 @@ mod tests {
     fn test_invalid_inputs_return_none() {
         // (input, count, reason)
         let cases: &[(&str, usize, &str)] = &[
-            ("0",    5, "zero is not 1-based"),
-            ("4",    3, "one above count"),
+            ("0", 5, "zero is not 1-based"),
+            ("4", 3, "one above count"),
             ("9999", 3, "way above count"),
-            ("1",    0, "no interfaces available"),
-            ("0",    0, "zero with no interfaces"),
+            ("1", 0, "no interfaces available"),
+            ("0", 0, "zero with no interfaces"),
             ("eth0", 5, "non-numeric word"),
-            ("hello",5, "arbitrary word"),
-            ("",     5, "empty string"),
-            ("   ",  5, "whitespace only"),
-            ("1.0",  5, "float"),
-            ("-1",   5, "negative number"),
-            (" 1 ",  5, "untrimmed number"),
-            ("1x",   5, "trailing char"),
-            ("2 ",   5, "trailing space"),
+            ("hello", 5, "arbitrary word"),
+            ("", 5, "empty string"),
+            ("   ", 5, "whitespace only"),
+            ("1.0", 5, "float"),
+            ("-1", 5, "negative number"),
+            (" 1 ", 5, "untrimmed number"),
+            ("1x", 5, "trailing char"),
+            ("2 ", 5, "trailing space"),
         ];
         for &(input, count, reason) in cases {
             assert!(

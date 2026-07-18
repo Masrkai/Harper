@@ -100,8 +100,7 @@ fn parse_mac(s: &str) -> Option<MacAddr> {
 mod tests {
     use super::*;
 
-    const HEADER: &str =
-        "IP address\tHW type\tFlags\tHW address\tMask\tDevice";
+    const HEADER: &str = "IP address\tHW type\tFlags\tHW address\tMask\tDevice";
 
     fn make_table(rows: &[(&str, &str)]) -> String {
         let mut out = format!("{HEADER}\n");
@@ -141,10 +140,10 @@ mod tests {
     #[test]
     fn test_filters_by_interface() {
         let other = "10.0.0.5\t0x1\t0x0\tBB:BB:BB:BB:BB:BB\t0x0\twlan0\n";
-        let table = format!("{HEADER}\n{other}{}", make_table(&[(
-            "192.168.1.10",
-            "AA:BB:CC:DD:EE:01",
-        )]));
+        let table = format!(
+            "{HEADER}\n{other}{}",
+            make_table(&[("192.168.1.10", "AA:BB:CC:DD:EE:01",)])
+        );
         let hosts = parse_arp_table(&table, "eth0", Ipv4Addr::new(192, 168, 1, 1));
         assert_eq!(hosts.len(), 1);
         assert_eq!(hosts[0].ip, Ipv4Addr::new(192, 168, 1, 10));
@@ -154,8 +153,7 @@ mod tests {
     fn test_empty_and_malformed_rows() {
         assert!(parse_arp_table("", "eth0", Ipv4Addr::new(0, 0, 0, 0)).is_empty());
         assert!(
-            parse_arp_table(&format!("{HEADER}\n"), "eth0", Ipv4Addr::new(0, 0, 0, 0))
-                .is_empty()
+            parse_arp_table(&format!("{HEADER}\n"), "eth0", Ipv4Addr::new(0, 0, 0, 0)).is_empty()
         );
         // bad MAC → row skipped
         let bad = format!("{HEADER}\n192.168.1.10\t0x1\t0x0\tNOTMAC\t0x0\teth0\n");

@@ -85,7 +85,10 @@ impl SpooferEngine {
 
         println!("[*] Starting ARP poison for host {}:", host_id);
         println!("    Victim:  {} @ {}", target.victim_ip, target.victim_mac);
-        println!("    Gateway: {} @ {}", target.gateway_ip, target.gateway_mac);
+        println!(
+            "    Gateway: {} @ {}",
+            target.gateway_ip, target.gateway_mac
+        );
 
         {
             let mut table = self.host_table.write().await;
@@ -103,8 +106,12 @@ impl SpooferEngine {
 
         let task = tokio::spawn(async move { poison_loop.run(target, stop_rx).await });
 
-        self.active_loops.insert(host_id, PoisonHandle { stop_tx, task });
-        println!("[+] Poison loop started for host {} (dedicated socket)", host_id);
+        self.active_loops
+            .insert(host_id, PoisonHandle { stop_tx, task });
+        println!(
+            "[+] Poison loop started for host {} (dedicated socket)",
+            host_id
+        );
     }
 
     async fn stop_poison(&mut self, host_id: crate::host::table::HostId) {

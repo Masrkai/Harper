@@ -23,16 +23,16 @@ use gherkin::GherkinEnv;
 use pnet::util::MacAddr;
 use std::net::Ipv4Addr;
 
-use crate::host::table::{DiscoveredHost, HostId, HostTable};
-use crate::forwarder::mock::{make_ipv4_frame, MockSender};
+use crate::Cli;
+use crate::forwarder::ForwarderCommand;
 use crate::forwarder::engine::PacketForwarder;
+use crate::forwarder::mock::{MockSender, make_ipv4_frame};
+use crate::host::table::{DiscoveredHost, HostId, HostTable};
 use crate::mitm_auto::MitmAutoManager;
 use crate::network::packet::{ArpPoison, ArpRestore};
 use crate::spoofer::{SpoofTarget, SpooferCommand};
 use crate::utils::neighbors::parse_arp_table;
 use crate::utils::tc::{ShapeMode, TcManager};
-use crate::forwarder::ForwarderCommand;
-use crate::Cli;
 use clap::Parser;
 use tokio::sync::mpsc;
 
@@ -108,7 +108,9 @@ fn parse_mac(s: &str) -> MacAddr {
         octets[i] = u8::from_str_radix(part, 16).unwrap();
         i += 1;
     }
-    MacAddr::new(octets[0], octets[1], octets[2], octets[3], octets[4], octets[5])
+    MacAddr::new(
+        octets[0], octets[1], octets[2], octets[3], octets[4], octets[5],
+    )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -193,13 +195,24 @@ fn bdd_gateway_cache_first_discovery_skips_the_active_scan() {
     let our_ip: Ipv4Addr = "192.168.1.1".parse().unwrap();
 
     let content = arp_cache_from(&[
-        vec!["192.168.1.10".into(), "AA:BB:CC:DD:EE:01".into(), "eth0".into()],
-        vec!["192.168.1.11".into(), "AA:BB:CC:DD:EE:02".into(), "eth0".into()],
+        vec![
+            "192.168.1.10".into(),
+            "AA:BB:CC:DD:EE:01".into(),
+            "eth0".into(),
+        ],
+        vec![
+            "192.168.1.11".into(),
+            "AA:BB:CC:DD:EE:02".into(),
+            "eth0".into(),
+        ],
     ]);
     let cached = parse_arp_table(&content, "eth0", our_ip);
     let cache_non_empty = !cached.is_empty();
 
-    assert!(cache_non_empty, "clients should be discovered from the cache");
+    assert!(
+        cache_non_empty,
+        "clients should be discovered from the cache"
+    );
     assert!(step_texts(sc)[4].starts_with("the active ARP scan is NOT used"));
 }
 
@@ -260,7 +273,10 @@ fn bdd_shaping_pool_mode_shares_one_class_across_all_victims() {
     use std::net::Ipv4Addr;
 
     let feat = load_feature("shaping_modes");
-    let sc = scenario_by_name(&feat, "Pool mode shares one bandwidth class across all victims");
+    let sc = scenario_by_name(
+        &feat,
+        "Pool mode shares one bandwidth class across all victims",
+    );
     let (_h, rows) = table_of(sc, 0);
 
     let victims: Vec<Ipv4Addr> = rows.iter().map(|r| r[0].parse().unwrap()).collect();
@@ -299,7 +315,10 @@ fn bdd_shaping_pool_class_created_once_across_reapplies() {
     // The shared class is created exactly once — this is the regression guard
     // against the old `remove_htb_leaf`+`add_htb_leaf` loop that produced
     // `RTNETLINK answers: File exists` on every re-apply.
-    assert_eq!(tc.class_creates, 1, "pool class must be created exactly once");
+    assert_eq!(
+        tc.class_creates, 1,
+        "pool class must be created exactly once"
+    );
     assert_eq!(tc.pool_calls.len(), 2, "ruleset refreshed on each apply");
     assert!(step_texts(sc)[3].starts_with("the shared class is created exactly once"));
     assert!(step_texts(sc)[4].starts_with("the pool ruleset is refreshed twice"));
@@ -332,7 +351,11 @@ fn bdd_shaping_mitm_pool_applies_across_selected_victims_excluding_gateway() {
         .filter(|e| e.host.ip != excluded_ip)
         .map(|e| e.id)
         .collect();
-    assert_eq!(selection_ids.len(), 2, "gateway must be excluded from victims");
+    assert_eq!(
+        selection_ids.len(),
+        2,
+        "gateway must be excluded from victims"
+    );
 
     // main.rs: pool wins → derive victim IPs from selection and call limit_pool.
     let pool_kbps = 1000u64;
@@ -343,7 +366,10 @@ fn bdd_shaping_mitm_pool_applies_across_selected_victims_excluding_gateway() {
             .filter_map(|&id| table.get_by_id(id).map(|e| e.host.ip))
             .collect();
         assert_eq!(victim_ips.len(), 2);
-        assert!(!victim_ips.contains(&gateway_ip), "gateway must not be pooled");
+        assert!(
+            !victim_ips.contains(&gateway_ip),
+            "gateway must not be pooled"
+        );
         tc.limit_pool(pool_kbps, &victim_ips);
     }
 
@@ -404,14 +430,21 @@ fn bdd_shaping_mitm_all_dynamically_adds_late_victim_to_pool() {
         .collect();
     tc.limit_pool(pool_kbps, &updated);
 
-    assert_eq!(tc.pool_calls.len(), 2, "pool re-applied once for the new victim");
+    assert_eq!(
+        tc.pool_calls.len(),
+        2,
+        "pool re-applied once for the new victim"
+    );
     let (kbps, victims) = &tc.pool_calls[1];
     assert_eq!(*kbps, pool_kbps);
     assert_eq!(victims.len(), 3, "late victim must be added to the pool");
     assert!(victims.contains(&Ipv4Addr::new(192, 168, 1, 5)));
     assert!(victims.contains(&Ipv4Addr::new(192, 168, 1, 6)));
     assert!(victims.contains(&Ipv4Addr::new(192, 168, 1, 7)));
-    assert!(!victims.contains(&gateway_ip), "gateway must never be pooled");
+    assert!(
+        !victims.contains(&gateway_ip),
+        "gateway must never be pooled"
+    );
     assert!(step_texts(sc)[3].starts_with("the shared pool"));
 }
 
@@ -453,7 +486,11 @@ fn bdd_shaping_mitm_all_non_interactive_selection() {
         .filter(|e| e.host.ip != excluded_ip)
         .map(|e| e.id)
         .collect();
-    assert_eq!(selection_ids.len(), 2, "gateway must be excluded from victims");
+    assert_eq!(
+        selection_ids.len(),
+        2,
+        "gateway must be excluded from victims"
+    );
 
     let victim_ips: Vec<Ipv4Addr> = selection_ids
         .iter()
@@ -462,12 +499,18 @@ fn bdd_shaping_mitm_all_non_interactive_selection() {
     assert_eq!(victim_ips.len(), 2);
     assert!(victim_ips.contains(&Ipv4Addr::new(192, 168, 1, 5)));
     assert!(victim_ips.contains(&Ipv4Addr::new(192, 168, 1, 6)));
-    assert!(!victim_ips.contains(&gateway_ip), "gateway must not be selected");
+    assert!(
+        !victim_ips.contains(&gateway_ip),
+        "gateway must not be selected"
+    );
 
     // --pool ⇒ per-host bandwidth prompt is skipped (bandwidth_kbps = None).
     let pool = Some(400u64);
     let bandwidth_kbps = if pool.is_some() { None } else { Some(1000u64) };
-    assert!(bandwidth_kbps.is_none(), "--pool must suppress the bandwidth prompt");
+    assert!(
+        bandwidth_kbps.is_none(),
+        "--pool must suppress the bandwidth prompt"
+    );
 
     // The contract: reaches here WITHOUT calling TargetSelector::select_with.
     assert!(step_texts(sc)[2].starts_with("the selected victim set is"));
@@ -479,14 +522,18 @@ fn bdd_shaping_uplink_exclusion_by_mac() {
     use std::net::Ipv4Addr;
 
     let feat = load_feature("shaping_modes");
-    let sc = scenario_by_name(&feat, "Uplink exclusion removes the bottleneck device from victims");
+    let sc = scenario_by_name(
+        &feat,
+        "Uplink exclusion removes the bottleneck device from victims",
+    );
 
     let table = host_table_from(&[("10.0.0.1", "AA:BB:CC:00:00:01")]);
-    let candidate_pool = vec![
-        Ipv4Addr::new(10, 0, 0, 1),
-        Ipv4Addr::new(10, 0, 0, 2),
-    ];
-    let excluded = crate::gateway_mode::resolve_uplink(&table, &Some("AA:BB:CC:00:00:01".into()), Ipv4Addr::new(192, 168, 1, 100));
+    let candidate_pool = vec![Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)];
+    let excluded = crate::gateway_mode::resolve_uplink(
+        &table,
+        &Some("AA:BB:CC:00:00:01".into()),
+        Ipv4Addr::new(192, 168, 1, 100),
+    );
 
     let remaining: Vec<Ipv4Addr> = candidate_pool
         .into_iter()
@@ -503,11 +550,12 @@ fn bdd_shaping_uplink_exclusion_by_ip() {
     let sc = scenario_by_name(&feat, "Uplink given as an IP excludes that device");
 
     let table = host_table_from(&[("10.0.0.1", "AA:BB:CC:00:00:01")]);
-    let candidate_pool = vec![
-        Ipv4Addr::new(10, 0, 0, 1),
-        Ipv4Addr::new(10, 0, 0, 2),
-    ];
-    let excluded = crate::gateway_mode::resolve_uplink(&table, &Some("10.0.0.1".into()), Ipv4Addr::new(192, 168, 1, 100));
+    let candidate_pool = vec![Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)];
+    let excluded = crate::gateway_mode::resolve_uplink(
+        &table,
+        &Some("10.0.0.1".into()),
+        Ipv4Addr::new(192, 168, 1, 100),
+    );
 
     let remaining: Vec<Ipv4Addr> = candidate_pool
         .into_iter()
@@ -556,8 +604,14 @@ fn bdd_host_table_insert_assigns_sequential_ids_after_reindex() {
         }
         table.reindex_by_ip();
 
-        let expected_ids: Vec<usize> = row[1].split(',').map(|s| s.trim().parse().unwrap()).collect();
-        let actual_ids: Vec<usize> = ips.iter().map(|ip| table.get_by_ip(ip.parse().unwrap()).unwrap().id).collect();
+        let expected_ids: Vec<usize> = row[1]
+            .split(',')
+            .map(|s| s.trim().parse().unwrap())
+            .collect();
+        let actual_ids: Vec<usize> = ips
+            .iter()
+            .map(|ip| table.get_by_ip(ip.parse().unwrap()).unwrap().id)
+            .collect();
 
         assert_eq!(actual_ids, expected_ids);
     }
@@ -578,12 +632,23 @@ fn bdd_host_table_duplicate_ip_updates_existing() {
         let id1 = table.iter().next().unwrap().id;
         let count1 = table.iter().next().unwrap().scan_count;
 
-        table.insert(host_table_from(&[(ip, mac2)]).iter().next().unwrap().host.clone());
+        table.insert(
+            host_table_from(&[(ip, mac2)])
+                .iter()
+                .next()
+                .unwrap()
+                .host
+                .clone(),
+        );
 
         assert_eq!(table.len(), 1, "table should not grow");
         let entry = table.get_by_id(id1).unwrap();
         // When IP already exists, MAC is NOT updated (only last_seen, vendor, scan_count)
-        assert_eq!(entry.host.mac.to_string().to_uppercase(), mac1.to_uppercase(), "MAC should NOT update, original MAC preserved");
+        assert_eq!(
+            entry.host.mac.to_string().to_uppercase(),
+            mac1.to_uppercase(),
+            "MAC should NOT update, original MAC preserved"
+        );
         assert_eq!(entry.scan_count, count1 + 1, "scan_count should increment");
     }
 }
@@ -603,12 +668,22 @@ fn bdd_host_table_duplicate_mac_updates_ip() {
         let id1 = table.iter().next().unwrap().id;
         let count1 = table.iter().next().unwrap().scan_count;
 
-        table.insert(host_table_from(&[(ip2, mac)]).iter().next().unwrap().host.clone());
+        table.insert(
+            host_table_from(&[(ip2, mac)])
+                .iter()
+                .next()
+                .unwrap()
+                .host
+                .clone(),
+        );
 
         assert_eq!(table.len(), 1, "table should not grow");
         let entry = table.get_by_id(id1).unwrap();
         assert_eq!(entry.host.ip.to_string(), ip2, "IP should update");
-        assert!(table.get_by_ip(ip1.parse().unwrap()).is_none(), "old IP removed from index");
+        assert!(
+            table.get_by_ip(ip1.parse().unwrap()).is_none(),
+            "old IP removed from index"
+        );
         assert_eq!(entry.scan_count, count1 + 1, "scan_count should increment");
     }
 }
@@ -659,14 +734,26 @@ fn bdd_host_table_remove_one_does_not_affect_others() {
         let ip2 = row[1].as_str();
         let ip3 = row[2].as_str();
 
-        let mut table = host_table_from(&[(ip1, "AA:BB:CC:DD:EE:01"), (ip2, "AA:BB:CC:DD:EE:02"), (ip3, "AA:BB:CC:DD:EE:03")]);
+        let mut table = host_table_from(&[
+            (ip1, "AA:BB:CC:DD:EE:01"),
+            (ip2, "AA:BB:CC:DD:EE:02"),
+            (ip3, "AA:BB:CC:DD:EE:03"),
+        ]);
         let id2 = table.get_by_ip(ip2.parse().unwrap()).unwrap().id;
 
         table.remove(id2);
 
-        assert!(table.get_by_id(table.get_by_ip(ip1.parse().unwrap()).unwrap().id).is_some());
+        assert!(
+            table
+                .get_by_id(table.get_by_ip(ip1.parse().unwrap()).unwrap().id)
+                .is_some()
+        );
         assert!(table.get_by_id(id2).is_none());
-        assert!(table.get_by_id(table.get_by_ip(ip3.parse().unwrap()).unwrap().id).is_some());
+        assert!(
+            table
+                .get_by_id(table.get_by_ip(ip3.parse().unwrap()).unwrap().id)
+                .is_some()
+        );
         assert_eq!(table.len(), 2);
     }
 }
@@ -705,7 +792,10 @@ fn bdd_host_table_update_state_cycles_through_all_variants() {
                 _ => panic!("unknown state"),
             };
             table.update_state(id, state);
-            assert_eq!(format!("{:?}", table.get_by_id(id).unwrap().state), state_str);
+            assert_eq!(
+                format!("{:?}", table.get_by_id(id).unwrap().state),
+                state_str
+            );
         }
     }
 }
@@ -731,7 +821,10 @@ fn bdd_host_table_get_stale_zero_max_age_returns_all() {
 
     for row in rows {
         let mut table = HostTable::new();
-        let ids: Vec<usize> = row[0].split(',').map(|s| s.trim().parse().unwrap()).collect();
+        let ids: Vec<usize> = row[0]
+            .split(',')
+            .map(|s| s.trim().parse().unwrap())
+            .collect();
         for (i, ip) in row[1].split(',').enumerate() {
             let ip = ip.trim().parse().unwrap();
             let mac = format!("AA:BB:CC:DD:EE:{:02X}", i + 1);
@@ -759,7 +852,10 @@ fn bdd_host_table_get_stale_max_age_returns_none() {
 
     for row in rows {
         let mut table = HostTable::new();
-        let ids: Vec<usize> = row[0].split(',').map(|s| s.trim().parse().unwrap()).collect();
+        let ids: Vec<usize> = row[0]
+            .split(',')
+            .map(|s| s.trim().parse().unwrap())
+            .collect();
         for (i, ip) in row[1].split(',').enumerate() {
             let ip = ip.trim().parse().unwrap();
             let mac = format!("AA:BB:CC:DD:EE:{:02X}", i + 1);
@@ -960,10 +1056,17 @@ fn bdd_host_table_duplicate_ip_does_not_grow_table() {
 #[test]
 fn bdd_tc_shaping_limiting_records_kbps() {
     let feat = load_feature("tc_shaping");
-    let _sc = scenario_by_name(&feat, "Limiting a host records it as shaping with the correct kbps");
+    let _sc = scenario_by_name(
+        &feat,
+        "Limiting a host records it as shaping with the correct kbps",
+    );
 
     let mut tc = TcManager::new("eth0");
-    tc.apply_host_slot(1 as HostId, "10.0.0.5".parse().unwrap(), ShapeMode::Limited(2048));
+    tc.apply_host_slot(
+        1 as HostId,
+        "10.0.0.5".parse().unwrap(),
+        ShapeMode::Limited(2048),
+    );
 
     assert!(tc.is_shaping(1));
     assert_eq!(tc.current_kbps(1), Some(2048));
@@ -984,11 +1087,22 @@ fn bdd_tc_shaping_blocking_records_zero_kbps() {
 #[test]
 fn bdd_tc_shaping_updating_mutates_rate() {
     let feat = load_feature("tc_shaping");
-    let _sc = scenario_by_name(&feat, "Updating an existing host mutates its rate without allocating a new slot");
+    let _sc = scenario_by_name(
+        &feat,
+        "Updating an existing host mutates its rate without allocating a new slot",
+    );
 
     let mut tc = TcManager::new("eth0");
-    let slot1 = tc.apply_host_slot(1 as HostId, "10.0.0.5".parse().unwrap(), ShapeMode::Limited(2048));
-    let slot2 = tc.apply_host_slot(1 as HostId, "10.0.0.5".parse().unwrap(), ShapeMode::Limited(512));
+    let slot1 = tc.apply_host_slot(
+        1 as HostId,
+        "10.0.0.5".parse().unwrap(),
+        ShapeMode::Limited(2048),
+    );
+    let slot2 = tc.apply_host_slot(
+        1 as HostId,
+        "10.0.0.5".parse().unwrap(),
+        ShapeMode::Limited(512),
+    );
 
     assert!(tc.is_shaping(1));
     assert_eq!(tc.current_kbps(1), Some(512));
@@ -998,20 +1112,42 @@ fn bdd_tc_shaping_updating_mutates_rate() {
 #[test]
 fn bdd_tc_shaping_slot_allocation_distinct_and_skips_passthrough() {
     let feat = load_feature("tc_shaping");
-    let _sc = scenario_by_name(&feat, "Slot allocation is monotonic and skips the passthrough slot");
+    let _sc = scenario_by_name(
+        &feat,
+        "Slot allocation is monotonic and skips the passthrough slot",
+    );
 
     let mut tc = TcManager::new("eth0");
-    let s1 = tc.apply_host_slot(1 as HostId, "10.0.0.5".parse().unwrap(), ShapeMode::Limited(1000));
-    let s2 = tc.apply_host_slot(2 as HostId, "10.0.0.6".parse().unwrap(), ShapeMode::Limited(1000));
-    let s3 = tc.apply_host_slot(3 as HostId, "10.0.0.7".parse().unwrap(), ShapeMode::Limited(1000));
+    let s1 = tc.apply_host_slot(
+        1 as HostId,
+        "10.0.0.5".parse().unwrap(),
+        ShapeMode::Limited(1000),
+    );
+    let s2 = tc.apply_host_slot(
+        2 as HostId,
+        "10.0.0.6".parse().unwrap(),
+        ShapeMode::Limited(1000),
+    );
+    let s3 = tc.apply_host_slot(
+        3 as HostId,
+        "10.0.0.7".parse().unwrap(),
+        ShapeMode::Limited(1000),
+    );
 
     let mut slots = [s1, s2, s3];
     slots.sort_unstable();
-    assert_eq!(slots, [s1, s2, s3], "slots must be assigned in increasing order");
+    assert_eq!(
+        slots,
+        [s1, s2, s3],
+        "slots must be assigned in increasing order"
+    );
     assert_ne!(s1, s2);
     assert_ne!(s2, s3);
     assert_ne!(s1, s3);
-    assert!(s1 != 0xFFF && s2 != 0xFFF && s3 != 0xFFF, "no slot may be the passthrough 0xFFF");
+    assert!(
+        s1 != 0xFFF && s2 != 0xFFF && s3 != 0xFFF,
+        "no slot may be the passthrough 0xFFF"
+    );
 }
 
 #[test]
@@ -1020,11 +1156,21 @@ fn bdd_tc_shaping_remove_clears_state() {
     let _sc = scenario_by_name(&feat, "Removing a host clears its shaping state");
 
     let mut tc = TcManager::new("eth0");
-    tc.apply_host_slot(1 as HostId, "10.0.0.5".parse().unwrap(), ShapeMode::Limited(1000));
+    tc.apply_host_slot(
+        1 as HostId,
+        "10.0.0.5".parse().unwrap(),
+        ShapeMode::Limited(1000),
+    );
     assert!(tc.is_shaping(1));
 
-    assert!(tc.clear_host_slot(1), "clear must report the host was present");
-    assert!(!tc.is_shaping(1), "host must no longer be shaping after clear");
+    assert!(
+        tc.clear_host_slot(1),
+        "clear must report the host was present"
+    );
+    assert!(
+        !tc.is_shaping(1),
+        "host must no longer be shaping after clear"
+    );
     assert_eq!(tc.current_kbps(1), None);
 }
 
@@ -1083,7 +1229,12 @@ fn make_mitm_harness(pairs: &[(&str, &str)], gateway_ip: Ipv4Addr) -> MitmHarnes
         None,
         None,
     );
-    MitmHarness { mgr, table, spoof_rx, fwd_rx }
+    MitmHarness {
+        mgr,
+        table,
+        spoof_rx,
+        fwd_rx,
+    }
 }
 
 /// Drains all currently-queued forward Enable victim IPs from the receiver.
@@ -1114,11 +1265,26 @@ async fn bdd_mitm_auto_seed_marks_hosts_managed() {
     let _sc = scenario_by_name(&feat, "Seeding victim ids marks them as managed");
 
     let mut h = make_mitm_harness(
-        &[("192.168.1.5", "AA:BB:CC:00:00:02"), ("192.168.1.6", "AA:BB:CC:00:00:03")],
+        &[
+            ("192.168.1.5", "AA:BB:CC:00:00:02"),
+            ("192.168.1.6", "AA:BB:CC:00:00:03"),
+        ],
         Ipv4Addr::new(192, 168, 1, 1),
     );
-    let id5 = h.table.read().await.get_by_ip(Ipv4Addr::new(192, 168, 1, 5)).unwrap().id;
-    let id6 = h.table.read().await.get_by_ip(Ipv4Addr::new(192, 168, 1, 6)).unwrap().id;
+    let id5 = h
+        .table
+        .read()
+        .await
+        .get_by_ip(Ipv4Addr::new(192, 168, 1, 5))
+        .unwrap()
+        .id;
+    let id6 = h
+        .table
+        .read()
+        .await
+        .get_by_ip(Ipv4Addr::new(192, 168, 1, 6))
+        .unwrap()
+        .id;
 
     h.mgr.seed(&[id5, id6]).await;
 
@@ -1131,16 +1297,33 @@ async fn bdd_mitm_auto_seed_marks_hosts_managed() {
 #[tokio::test]
 async fn bdd_mitm_auto_seen_non_gateway_added_as_victim() {
     let feat = load_feature("mitm_auto");
-    let _sc = scenario_by_name(&feat, "A seen device that is not the gateway is added as a victim");
+    let _sc = scenario_by_name(
+        &feat,
+        "A seen device that is not the gateway is added as a victim",
+    );
 
-    let mut h = make_mitm_harness(&[("192.168.1.5", "AA:BB:CC:00:00:02")], Ipv4Addr::new(192, 168, 1, 1));
+    let mut h = make_mitm_harness(
+        &[("192.168.1.5", "AA:BB:CC:00:00:02")],
+        Ipv4Addr::new(192, 168, 1, 1),
+    );
 
-    h.mgr.on_seen(Ipv4Addr::new(192, 168, 1, 5), MacAddr::new(0xAA, 0, 0, 0, 0, 2)).await;
+    h.mgr
+        .on_seen(
+            Ipv4Addr::new(192, 168, 1, 5),
+            MacAddr::new(0xAA, 0, 0, 0, 0, 2),
+        )
+        .await;
 
     let fwd = drained_fwd_victims(&mut h.fwd_rx).await;
     let spoof = drained_spoof_victims(&mut h.spoof_rx).await;
-    assert!(fwd.contains(&Ipv4Addr::new(192, 168, 1, 5)), "forward Enable for victim");
-    assert!(spoof.contains(&Ipv4Addr::new(192, 168, 1, 5)), "spoof Start for victim");
+    assert!(
+        fwd.contains(&Ipv4Addr::new(192, 168, 1, 5)),
+        "forward Enable for victim"
+    );
+    assert!(
+        spoof.contains(&Ipv4Addr::new(192, 168, 1, 5)),
+        "spoof Start for victim"
+    );
 }
 
 #[tokio::test]
@@ -1148,9 +1331,17 @@ async fn bdd_mitm_auto_gateway_never_added() {
     let feat = load_feature("mitm_auto");
     let _sc = scenario_by_name(&feat, "The gateway is never added as a victim");
 
-    let mut h = make_mitm_harness(&[("192.168.1.1", "AA:BB:CC:00:00:01")], Ipv4Addr::new(192, 168, 1, 1));
+    let mut h = make_mitm_harness(
+        &[("192.168.1.1", "AA:BB:CC:00:00:01")],
+        Ipv4Addr::new(192, 168, 1, 1),
+    );
 
-    h.mgr.on_seen(Ipv4Addr::new(192, 168, 1, 1), MacAddr::new(0, 0, 0, 0, 0, 1)).await;
+    h.mgr
+        .on_seen(
+            Ipv4Addr::new(192, 168, 1, 1),
+            MacAddr::new(0, 0, 0, 0, 0, 1),
+        )
+        .await;
 
     let fwd = drained_fwd_victims(&mut h.fwd_rx).await;
     let spoof = drained_spoof_victims(&mut h.spoof_rx).await;
@@ -1163,13 +1354,29 @@ async fn bdd_mitm_auto_reseen_deduped() {
     let feat = load_feature("mitm_auto");
     let _sc = scenario_by_name(&feat, "A re-seen already-managed device is de-duplicated");
 
-    let mut h = make_mitm_harness(&[("192.168.1.5", "AA:BB:CC:00:00:02")], Ipv4Addr::new(192, 168, 1, 1));
+    let mut h = make_mitm_harness(
+        &[("192.168.1.5", "AA:BB:CC:00:00:02")],
+        Ipv4Addr::new(192, 168, 1, 1),
+    );
 
-    h.mgr.on_seen(Ipv4Addr::new(192, 168, 1, 5), MacAddr::new(0xAA, 0, 0, 0, 0, 2)).await;
-    h.mgr.on_seen(Ipv4Addr::new(192, 168, 1, 5), MacAddr::new(0xAA, 0, 0, 0, 0, 2)).await;
+    h.mgr
+        .on_seen(
+            Ipv4Addr::new(192, 168, 1, 5),
+            MacAddr::new(0xAA, 0, 0, 0, 0, 2),
+        )
+        .await;
+    h.mgr
+        .on_seen(
+            Ipv4Addr::new(192, 168, 1, 5),
+            MacAddr::new(0xAA, 0, 0, 0, 0, 2),
+        )
+        .await;
 
     let fwd = drained_fwd_victims(&mut h.fwd_rx).await;
-    let count = fwd.iter().filter(|&&ip| ip == Ipv4Addr::new(192, 168, 1, 5)).count();
+    let count = fwd
+        .iter()
+        .filter(|&&ip| ip == Ipv4Addr::new(192, 168, 1, 5))
+        .count();
     assert_eq!(count, 1, "re-seen victim must emit exactly one Enable");
     assert_eq!(h.mgr.managed_count(), 1, "managed set must not double-add");
 }
@@ -1180,12 +1387,25 @@ async fn bdd_mitm_auto_late_join_grows_managed() {
     let _sc = scenario_by_name(&feat, "A late-joining device grows the managed set");
 
     let mut h = make_mitm_harness(
-        &[("192.168.1.5", "AA:BB:CC:00:00:02"), ("192.168.1.7", "AA:BB:CC:00:00:07")],
+        &[
+            ("192.168.1.5", "AA:BB:CC:00:00:02"),
+            ("192.168.1.7", "AA:BB:CC:00:00:07"),
+        ],
         Ipv4Addr::new(192, 168, 1, 1),
     );
 
-    h.mgr.on_seen(Ipv4Addr::new(192, 168, 1, 5), MacAddr::new(0xAA, 0, 0, 0, 0, 2)).await;
-    h.mgr.on_seen(Ipv4Addr::new(192, 168, 1, 7), MacAddr::new(0xAA, 0, 0, 0, 0, 7)).await;
+    h.mgr
+        .on_seen(
+            Ipv4Addr::new(192, 168, 1, 5),
+            MacAddr::new(0xAA, 0, 0, 0, 0, 2),
+        )
+        .await;
+    h.mgr
+        .on_seen(
+            Ipv4Addr::new(192, 168, 1, 7),
+            MacAddr::new(0xAA, 0, 0, 0, 0, 7),
+        )
+        .await;
 
     let fwd = drained_fwd_victims(&mut h.fwd_rx).await;
     assert!(fwd.contains(&Ipv4Addr::new(192, 168, 1, 5)));
@@ -1218,12 +1438,23 @@ fn bdd_spoofer_victim_direction_lies_about_gateway_mac() {
     let our_mac = MacAddr::new(0xAA, 0xBB, 0xCC, 0x00, 0x00, 0xFF);
 
     // Mirror PoisonLoop::run victim-direction construction.
-    let frame = ArpPoison::new(target.victim_mac, target.victim_ip, target.gateway_ip, our_mac);
+    let frame = ArpPoison::new(
+        target.victim_mac,
+        target.victim_ip,
+        target.gateway_ip,
+        our_mac,
+    );
 
     assert_eq!(frame.target_mac, target.victim_mac);
     assert_eq!(frame.target_ip, target.victim_ip);
-    assert_eq!(frame.spoofed_ip, target.gateway_ip, "victim told gateway IP is here");
-    assert_eq!(frame.our_mac, our_mac, "victim told gateway IP maps to our MAC");
+    assert_eq!(
+        frame.spoofed_ip, target.gateway_ip,
+        "victim told gateway IP is here"
+    );
+    assert_eq!(
+        frame.our_mac, our_mac,
+        "victim told gateway IP maps to our MAC"
+    );
 }
 
 #[test]
@@ -1237,12 +1468,23 @@ fn bdd_spoofer_gateway_direction_lies_about_victim_mac() {
     let our_mac = MacAddr::new(0xAA, 0xBB, 0xCC, 0x00, 0x00, 0xFF);
 
     // Mirror PoisonLoop::run gateway-direction construction.
-    let frame = ArpPoison::new(target.gateway_mac, target.gateway_ip, target.victim_ip, our_mac);
+    let frame = ArpPoison::new(
+        target.gateway_mac,
+        target.gateway_ip,
+        target.victim_ip,
+        our_mac,
+    );
 
     assert_eq!(frame.target_mac, target.gateway_mac);
     assert_eq!(frame.target_ip, target.gateway_ip);
-    assert_eq!(frame.spoofed_ip, target.victim_ip, "gateway told victim IP is here");
-    assert_eq!(frame.our_mac, our_mac, "gateway told victim IP maps to our MAC");
+    assert_eq!(
+        frame.spoofed_ip, target.victim_ip,
+        "gateway told victim IP is here"
+    );
+    assert_eq!(
+        frame.our_mac, our_mac,
+        "gateway told victim IP maps to our MAC"
+    );
 }
 
 #[test]
@@ -1265,7 +1507,10 @@ fn bdd_spoofer_restore_tells_true_gateway_mac() {
     assert_eq!(frame.target_mac, target.victim_mac);
     assert_eq!(frame.target_ip, target.victim_ip);
     assert_eq!(frame.real_ip, target.gateway_ip);
-    assert_eq!(frame.real_mac, target.gateway_mac, "restore reveals the TRUE gateway MAC");
+    assert_eq!(
+        frame.real_mac, target.gateway_mac,
+        "restore reveals the TRUE gateway MAC"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1289,9 +1534,17 @@ fn bdd_forwarder_large_ipv4_fragmented_to_mtu() {
     let frame = make_ipv4_frame(9000);
     PacketForwarder::relay_packet(&mut sender, &frame, fwd_new_dst(), fwd_our_mac());
 
-    assert!(sender.sent.len() > 1, "expected fragmentation into multiple frames");
+    assert!(
+        sender.sent.len() > 1,
+        "expected fragmentation into multiple frames"
+    );
     for (i, frag) in sender.sent.iter().enumerate() {
-        assert!(frag.len() <= 1514, "fragment {} is {} bytes — exceeds MTU", i, frag.len());
+        assert!(
+            frag.len() <= 1514,
+            "fragment {} is {} bytes — exceeds MTU",
+            i,
+            frag.len()
+        );
     }
 }
 
@@ -1316,7 +1569,11 @@ fn bdd_forwarder_enobufs_exhausts_retry_budget() {
     let frame = make_ipv4_frame(20);
     PacketForwarder::send_with_retry(&mut sender, &frame);
 
-    assert_eq!(sender.sent.len(), 0, "no frame delivered after exhausting retries");
+    assert_eq!(
+        sender.sent.len(),
+        0,
+        "no frame delivered after exhausting retries"
+    );
     assert_eq!(sender.call_count, 4, "sender attempted exactly four times");
 }
 
@@ -1358,6 +1615,15 @@ fn bdd_kernel_flag_incompatible_with_gateway_mode() {
 
     // The guard in main() exits(1) when both are set; here we assert the two
     // flags are independently parseable but mutually exclusive by contract.
-    let cli = Cli::parse_from(["harper", "--interface", "wlan0", "--kernel", "--gateway-mode"]);
-    assert!(cli.kernel && cli.gateway_mode, "both flags parse; main() enforces the guard");
+    let cli = Cli::parse_from([
+        "harper",
+        "--interface",
+        "wlan0",
+        "--kernel",
+        "--gateway-mode",
+    ]);
+    assert!(
+        cli.kernel && cli.gateway_mode,
+        "both flags parse; main() enforces the guard"
+    );
 }

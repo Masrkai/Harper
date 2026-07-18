@@ -50,11 +50,7 @@ impl PoisonLoop {
     ///
     /// The `_interval_ms` parameter is retained for API compatibility but
     /// ignored — the constants above are used instead.
-    pub fn new(
-        interface_name: impl Into<String>,
-        our_mac: MacAddr,
-        _interval_ms: u64,
-    ) -> Self {
+    pub fn new(interface_name: impl Into<String>, our_mac: MacAddr, _interval_ms: u64) -> Self {
         Self {
             interface_name: interface_name.into(),
             our_mac,
@@ -90,12 +86,16 @@ impl PoisonLoop {
         // Send the first poison immediately so the MITM position is
         // established before the first interval fires.
         send_once(&mut *sender, &to_victim.to_bytes(), "initial poison victim");
-        send_once(&mut *sender, &to_gateway.to_bytes(), "initial poison gateway");
+        send_once(
+            &mut *sender,
+            &to_gateway.to_bytes(),
+            "initial poison gateway",
+        );
 
         let mut victim_count: u64 = 1;
         let mut gateway_count: u64 = 1;
 
-        let mut next_victim  = tokio::time::Instant::now() + jitter(VICTIM_INTERVAL_MS);
+        let mut next_victim = tokio::time::Instant::now() + jitter(VICTIM_INTERVAL_MS);
         let mut next_gateway = tokio::time::Instant::now() + jitter(GATEWAY_INTERVAL_MS);
 
         loop {
@@ -188,7 +188,7 @@ fn restore(sender: &mut dyn DataLinkSender, target: &super::SpoofTarget) {
     );
 
     for _ in 0..5 {
-        send_once(sender, &victim_restore.to_bytes(),  "restore victim");
+        send_once(sender, &victim_restore.to_bytes(), "restore victim");
         send_once(sender, &gateway_restore.to_bytes(), "restore gateway");
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -239,7 +239,10 @@ mod tests {
     fn test_jitter_not_constant() {
         let samples: Vec<u64> = (0..20).map(|_| jitter(8_000).as_millis() as u64).collect();
         let unique: std::collections::HashSet<u64> = samples.iter().copied().collect();
-        assert!(unique.len() > 1, "jitter produced identical values — LCG broken");
+        assert!(
+            unique.len() > 1,
+            "jitter produced identical values — LCG broken"
+        );
     }
 
     #[test]

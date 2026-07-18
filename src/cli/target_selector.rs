@@ -103,7 +103,10 @@ impl TargetSelector {
 
         println!(
             "\n{}",
-            paint!(&palette::DIM, r#"  Formats:  "3"   "1-5"   "1,3,5"   "all""#)
+            paint!(
+                &palette::DIM,
+                r#"  Formats:  "3"   "1-5"   "1,3,5"   "all""#
+            )
         );
 
         print!(
@@ -270,9 +273,15 @@ fn read_line() -> Option<String> {
 mod tests {
     use super::*;
 
-    fn avail_1_to_5() -> Vec<HostId> { vec![1, 2, 3, 4, 5] }
-    fn avail_sparse()  -> Vec<HostId> { vec![1, 3, 5] }
-    fn avail_single()  -> Vec<HostId> { vec![1] }
+    fn avail_1_to_5() -> Vec<HostId> {
+        vec![1, 2, 3, 4, 5]
+    }
+    fn avail_sparse() -> Vec<HostId> {
+        vec![1, 3, 5]
+    }
+    fn avail_single() -> Vec<HostId> {
+        vec![1]
+    }
 
     // ── "all" keyword ─────────────────────────────────────────────────────────
     #[test]
@@ -291,10 +300,7 @@ mod tests {
             Some(vec![1, 3, 5])
         );
         // Empty available: returns Some([])
-        assert_eq!(
-            TargetSelector::parse_selection("all", &[]),
-            Some(vec![])
-        );
+        assert_eq!(TargetSelector::parse_selection("all", &[]), Some(vec![]));
     }
 
     // ── Single IDs ────────────────────────────────────────────────────────────
@@ -302,12 +308,15 @@ mod tests {
     fn test_single_valid_ids() {
         let cases = [
             ("1", &avail_1_to_5() as &[HostId], vec![1]),
-            ("5", &avail_1_to_5(),               vec![5]),
-            ("3", &avail_1_to_5(),               vec![3]),
-            ("1", &avail_single(),               vec![1]),
+            ("5", &avail_1_to_5(), vec![5]),
+            ("3", &avail_1_to_5(), vec![3]),
+            ("1", &avail_single(), vec![1]),
         ];
         for (input, avail, expected) in cases {
-            assert_eq!(TargetSelector::parse_selection(input, avail), Some(expected));
+            assert_eq!(
+                TargetSelector::parse_selection(input, avail),
+                Some(expected)
+            );
         }
     }
 
@@ -315,11 +324,11 @@ mod tests {
     #[test]
     fn test_ranges() {
         let cases: &[(&str, &[HostId], Vec<HostId>)] = &[
-            ("1-5", &[1,2,3,4,5], vec![1,2,3,4,5]),  // full
-            ("1-3", &[1,2,3,4,5], vec![1,2,3]),       // partial low
-            ("3-5", &[1,2,3,4,5], vec![3,4,5]),       // partial high
-            ("3-3", &[1,2,3,4,5], vec![3]),            // unit range
-            ("1-5", &[1,3,5],     vec![1,3,5]),        // skips unavailable IDs
+            ("1-5", &[1, 2, 3, 4, 5], vec![1, 2, 3, 4, 5]), // full
+            ("1-3", &[1, 2, 3, 4, 5], vec![1, 2, 3]),       // partial low
+            ("3-5", &[1, 2, 3, 4, 5], vec![3, 4, 5]),       // partial high
+            ("3-3", &[1, 2, 3, 4, 5], vec![3]),             // unit range
+            ("1-5", &[1, 3, 5], vec![1, 3, 5]),             // skips unavailable IDs
         ];
         for &(input, avail, ref expected) in cases {
             assert_eq!(
@@ -335,11 +344,11 @@ mod tests {
     fn test_comma_lists() {
         let a = avail_1_to_5();
         let cases: &[(&str, Vec<HostId>)] = &[
-            ("1,3",   vec![1, 3]),
+            ("1,3", vec![1, 3]),
             ("1,3,5", vec![1, 3, 5]),
-            ("1, 3, 5", vec![1, 3, 5]),   // spaces around commas
-            ("1,1,2", vec![1, 2]),         // deduplication
-            ("5,1,3", vec![1, 3, 5]),      // output is sorted
+            ("1, 3, 5", vec![1, 3, 5]), // spaces around commas
+            ("1,1,2", vec![1, 2]),      // deduplication
+            ("5,1,3", vec![1, 3, 5]),   // output is sorted
         ];
         for &(input, ref expected) in cases {
             assert_eq!(
@@ -355,9 +364,9 @@ mod tests {
     fn test_mixed_inputs() {
         let a = avail_1_to_5();
         let cases: &[(&str, Vec<HostId>)] = &[
-            ("1-3,5",   vec![1,2,3,5]),
-            ("1,3-5",   vec![1,3,4,5]),
-            ("1-3,2",   vec![1,2,3]),     // overlap deduplication
+            ("1-3,5", vec![1, 2, 3, 5]),
+            ("1,3-5", vec![1, 3, 4, 5]),
+            ("1-3,2", vec![1, 2, 3]), // overlap deduplication
         ];
         for &(input, ref expected) in cases {
             assert_eq!(
@@ -373,15 +382,15 @@ mod tests {
     fn test_invalid_inputs_return_none() {
         let a5 = avail_1_to_5();
         let cases: &[(&str, &[HostId], &str)] = &[
-            ("5-1",  &a5, "reversed range"),
-            ("3-2",  &a5, "adjacent reversed"),
-            ("6",    &a5, "ID not in available set"),
-            ("0",    &a5, "zero ID"),
+            ("5-1", &a5, "reversed range"),
+            ("3-2", &a5, "adjacent reversed"),
+            ("6", &a5, "ID not in available set"),
+            ("0", &a5, "zero ID"),
             ("1-99", &a5, "range end above max"),
-            ("",     &a5, "empty string"),
-            ("abc",  &a5, "non-numeric word"),
-            ("1.5",  &a5, "float"),
-            ("-1",   &a5, "negative number"),
+            ("", &a5, "empty string"),
+            ("abc", &a5, "non-numeric word"),
+            ("1.5", &a5, "float"),
+            ("-1", &a5, "negative number"),
         ];
         for &(input, avail, reason) in cases {
             assert!(
@@ -411,13 +420,17 @@ mod tests {
     fn test_parse_bandwidth() {
         // Valid → Some
         let valid: &[(&str, u64)] = &[
-            ("1",       1),
-            ("512",     512),
-            ("1000",    1_000),
+            ("1", 1),
+            ("512", 512),
+            ("1000", 1_000),
             ("1000000", 1_000_000),
         ];
         for &(input, expected) in valid {
-            assert_eq!(TargetSelector::parse_bandwidth(input), Some(expected), "input '{input}'");
+            assert_eq!(
+                TargetSelector::parse_bandwidth(input),
+                Some(expected),
+                "input '{input}'"
+            );
         }
 
         // Invalid → None

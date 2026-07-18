@@ -56,17 +56,17 @@ macro_rules! paint {
 pub mod palette {
     use super::Color;
 
-    pub const OK:      Color = Color::from_hex(b"#50C878");
-    pub const WARN:    Color = Color::from_hex(b"#FFB347");
+    pub const OK: Color = Color::from_hex(b"#50C878");
+    pub const WARN: Color = Color::from_hex(b"#FFB347");
     pub const KEYWORD: Color = Color::from_hex(b"#C792EA");
-    pub const PROMPT:  Color = Color::from_hex(b"#C792EA");
+    pub const PROMPT: Color = Color::from_hex(b"#C792EA");
     pub const MESSAGE: Color = Color::from_hex(b"#C792EA");
-    pub const DIM:     Color = Color::from_hex(b"#888888");
+    pub const DIM: Color = Color::from_hex(b"#888888");
 
-    pub const INFO:    Color = Color::from_hex(b"#50C878");
-    pub const DEBUG:   Color = Color::from_hex(b"#508CFF");
-    pub const ERROR:   Color = Color::from_hex(b"#FF5050");
-    pub const FATAL:   Color = Color::from_hex(b"#8B0000");
+    pub const INFO: Color = Color::from_hex(b"#50C878");
+    pub const DEBUG: Color = Color::from_hex(b"#508CFF");
+    pub const ERROR: Color = Color::from_hex(b"#FF5050");
+    pub const FATAL: Color = Color::from_hex(b"#8B0000");
 }
 
 // ── Compile-time assertions ───────────────────────────────────────────────────
@@ -107,22 +107,24 @@ mod tests {
     #[test]
     fn test_parse_hex_valid_inputs() {
         let cases: &[(&[u8], (u8, u8, u8))] = &[
-            (b"#FFFFFF", (255, 255, 255)),   // pure white
-            (b"#000000", (0, 0, 0)),         // pure black
-            (b"#FF0000", (255, 0, 0)),       // pure red
-            (b"#00FF00", (0, 255, 0)),       // pure green
-            (b"#0000FF", (0, 0, 255)),       // pure blue
+            (b"#FFFFFF", (255, 255, 255)),    // pure white
+            (b"#000000", (0, 0, 0)),          // pure black
+            (b"#FF0000", (255, 0, 0)),        // pure red
+            (b"#00FF00", (0, 255, 0)),        // pure green
+            (b"#0000FF", (0, 0, 255)),        // pure blue
             (b"#C792EA", (0xC7, 0x92, 0xEA)), // purple used in codebase
             (b"#50c878", (0x50, 0xC8, 0x78)), // lowercase digits
             (b"#Ff8800", (0xFF, 0x88, 0x00)), // mixed case
-            (b"#010203", (1, 2, 3)),           // boundary nibbles
+            (b"#010203", (1, 2, 3)),          // boundary nibbles
             (b"#09AF00", (0x09, 0xAF, 0x00)), // all hex digit classes
             (b"#1a2b3c", (0x1A, 0x2B, 0x3C)),
         ];
         for &(input, expected) in cases {
             assert_eq!(
-                parse_hex(input), expected,
-                "parse_hex({}) failed", std::str::from_utf8(input).unwrap_or("?")
+                parse_hex(input),
+                expected,
+                "parse_hex({}) failed",
+                std::str::from_utf8(input).unwrap_or("?")
             );
         }
     }
@@ -146,13 +148,13 @@ mod tests {
     fn test_parse_hex_invalid_inputs_panic() {
         // Each closure must panic; we verify this with catch_unwind.
         let bad_inputs: &[&[u8]] = &[
-            b"#FF00",      // too short (5 bytes)
+            b"#FF00",       // too short (5 bytes)
             b"#FF0000AABB", // too long (11 bytes)
-            b"#FF0000A",   // 8 bytes — neither 7 nor 9
-            b"FF0000",     // missing '#'
-            b"#FF",        // '#' present but wrong length
-            b"#GG0000",    // invalid hex char 'G'
-            b"#FF 000",    // space in digits
+            b"#FF0000A",    // 8 bytes — neither 7 nor 9
+            b"FF0000",      // missing '#'
+            b"#FF",         // '#' present but wrong length
+            b"#GG0000",     // invalid hex char 'G'
+            b"#FF 000",     // space in digits
         ];
         for &input in bad_inputs {
             let result = std::panic::catch_unwind(|| parse_hex(input));
@@ -169,10 +171,10 @@ mod tests {
     fn test_paint_ansi_escape_format() {
         // Verifies the exact ANSI true-color escape sequence structure.
         let cases: &[(u8, u8, u8, &str, &str)] = &[
-            (255, 128,   0, "hello", "\x1b[38;2;255;128;0mhello\x1b[0m"),
-            (  0,   0,   0, "x",     "\x1b[38;2;0;0;0mx\x1b[0m"),
-            (255, 255, 255, "y",     "\x1b[38;2;255;255;255my\x1b[0m"),
-            (  0,   0,   0, "",      "\x1b[38;2;0;0;0m\x1b[0m"),   // empty text
+            (255, 128, 0, "hello", "\x1b[38;2;255;128;0mhello\x1b[0m"),
+            (0, 0, 0, "x", "\x1b[38;2;0;0;0mx\x1b[0m"),
+            (255, 255, 255, "y", "\x1b[38;2;255;255;255my\x1b[0m"),
+            (0, 0, 0, "", "\x1b[38;2;0;0;0m\x1b[0m"), // empty text
         ];
         for &(r, g, b, text, expected) in cases {
             assert_eq!(Color(r, g, b).paint(text), expected);
@@ -192,10 +194,8 @@ mod tests {
     // ── Color::from_hex ───────────────────────────────────────────────────────
     #[test]
     fn test_from_hex_stores_parsed_bytes() {
-        let cases: &[(&[u8], (u8, u8, u8))] = &[
-            (b"#C792EA", (0xC7, 0x92, 0xEA)),
-            (b"#000000", (0, 0, 0)),
-        ];
+        let cases: &[(&[u8], (u8, u8, u8))] =
+            &[(b"#C792EA", (0xC7, 0x92, 0xEA)), (b"#000000", (0, 0, 0))];
         for &(input, (er, eg, eb)) in cases {
             let c = Color::from_hex(input);
             assert_eq!((c.0, c.1, c.2), (er, eg, eb));

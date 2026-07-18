@@ -66,15 +66,19 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
-use tokio::io::AsyncWriteExt as _;
 use std::process::Stdio;
+use tokio::io::AsyncWriteExt as _;
 use tokio::process::Command;
 
 use crate::host::table::HostId;
 use crate::infra::Cleanupable;
 
 impl Cleanupable for TcManager {
-    fn cleanup(&mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Box<dyn std::error::Error>>> + Send + '_>> {
+    fn cleanup(
+        &mut self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), Box<dyn std::error::Error>>> + Send + '_>,
+    > {
         let tc = self;
         Box::pin(async move {
             tc.cleanup().await;
@@ -169,7 +173,8 @@ impl TcManager {
             "handle",
             "ffff:",
             "ingress",
-        ]).await?;
+        ])
+        .await?;
         run_check(&[
             "tc",
             "filter",
@@ -193,7 +198,8 @@ impl TcManager {
             "redirect",
             "dev",
             IFB_DEV,
-        ]).await?;
+        ])
+        .await?;
 
         // HTB root on physical NIC (upload / egress)
         run_check(&[
@@ -208,8 +214,10 @@ impl TcManager {
             "htb",
             "default",
             &format!("{:x}", SLOT_PASSTHROUGH),
-        ]).await?;
-        self.add_root_classes(&self.interface.clone(), HANDLE_EGRESS).await?;
+        ])
+        .await?;
+        self.add_root_classes(&self.interface.clone(), HANDLE_EGRESS)
+            .await?;
 
         // HTB root on IFB (download / redirected ingress)
         run_check(&[
@@ -224,7 +232,8 @@ impl TcManager {
             "htb",
             "default",
             &format!("{:x}", SLOT_PASSTHROUGH),
-        ]).await?;
+        ])
+        .await?;
         self.add_root_classes(IFB_DEV, HANDLE_INGRESS).await?;
 
         self.nft_create_table().await?;
@@ -383,7 +392,11 @@ impl TcManager {
         }
     }
 
-    async fn add_root_classes(&self, dev: &str, handle: &str) -> Result<(), Box<dyn std::error::Error>> {
+    async fn add_root_classes(
+        &self,
+        dev: &str,
+        handle: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let major = handle.trim_end_matches(':');
         let root_class = format!("{}:1", major);
         let pass_class = format!("{}:{:x}", major, SLOT_PASSTHROUGH);
@@ -401,7 +414,8 @@ impl TcManager {
             "htb",
             "rate",
             LINE_RATE,
-        ]).await?;
+        ])
+        .await?;
         run_check(&[
             "tc",
             "class",
@@ -415,7 +429,8 @@ impl TcManager {
             "htb",
             "rate",
             LINE_RATE,
-        ]).await?;
+        ])
+        .await?;
         Ok(())
     }
 
@@ -424,7 +439,12 @@ impl TcManager {
     /// update can be asserted root-free (e.g. BDD tests call this directly).
     /// Reuses the existing slot when the host is already shaped (mirrors the
     /// Limited→Limited update path in `limit_host`), otherwise allocates fresh.
-    pub(crate) fn apply_host_slot(&mut self, host_id: HostId, ip: Ipv4Addr, mode: ShapeMode) -> u16 {
+    pub(crate) fn apply_host_slot(
+        &mut self,
+        host_id: HostId,
+        ip: Ipv4Addr,
+        mode: ShapeMode,
+    ) -> u16 {
         let slot = match self.hosts.get(&host_id) {
             Some(existing) => existing.slot,
             None => self.alloc_slot(),
@@ -464,7 +484,10 @@ impl TcManager {
         self.hosts.remove(&host_id).is_some()
     }
 
-    async fn remove_host_inner(&mut self, host_id: HostId) -> Result<(), Box<dyn std::error::Error>> {
+    async fn remove_host_inner(
+        &mut self,
+        host_id: HostId,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let info = match self.hosts.remove(&host_id) {
             Some(s) => s,
             None => return Ok(()),
@@ -516,7 +539,8 @@ impl TcManager {
                 &rate_str,
                 "burst",
                 &burst,
-            ]).await?;
+            ])
+            .await?;
             run_check(&[
                 "tc",
                 "qdisc",
@@ -530,7 +554,8 @@ impl TcManager {
                 "sfq",
                 "perturb",
                 "10",
-            ]).await?;
+            ])
+            .await?;
             run_check(&[
                 "tc",
                 "filter",
@@ -546,7 +571,8 @@ impl TcManager {
                 "fw",
                 "flowid",
                 &classid,
-            ]).await?;
+            ])
+            .await?;
         }
 
         // ── NO per-victim ingress filter here ─────────────────────────────────
@@ -586,7 +612,8 @@ impl TcManager {
                 &rate_str,
                 "burst",
                 &burst,
-            ]).await?;
+            ])
+            .await?;
             run_check(&[
                 "tc",
                 "qdisc",
@@ -600,7 +627,8 @@ impl TcManager {
                 "sfq",
                 "perturb",
                 "10",
-            ]).await?;
+            ])
+            .await?;
             run_check(&[
                 "tc",
                 "filter",
@@ -616,7 +644,8 @@ impl TcManager {
                 "fw",
                 "flowid",
                 &classid,
-            ]).await?;
+            ])
+            .await?;
         }
 
         Ok(())
@@ -640,12 +669,17 @@ impl TcManager {
                 &classid,
                 "handle",
                 &leaf_handle,
-            ]).await;
+            ])
+            .await;
             let _ = run(&["tc", "class", "del", "dev", dev, "classid", &classid]).await;
         }
     }
 
-    async fn update_rate_classes(&self, slot: u16, kbps: u64) -> Result<(), Box<dyn std::error::Error>> {
+    async fn update_rate_classes(
+        &self,
+        slot: u16,
+        kbps: u64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let rate_str = format!("{}kbit", kbps);
         let burst = burst_for(kbps);
 
@@ -674,7 +708,8 @@ impl TcManager {
                 &rate_str,
                 "burst",
                 &burst,
-            ]).await?;
+            ])
+            .await?;
         }
         Ok(())
     }
@@ -1005,10 +1040,7 @@ mod tests {
 
     #[test]
     fn test_build_nft_pool_rules_single_shared_mark() {
-        let victims = vec![
-            Ipv4Addr::new(10, 0, 0, 5),
-            Ipv4Addr::new(10, 0, 0, 6),
-        ];
+        let victims = vec![Ipv4Addr::new(10, 0, 0, 5), Ipv4Addr::new(10, 0, 0, 6)];
         let rules = build_nft_pool_rules(&victims);
         // Both victims marked with the SAME shared mark (MARK_POOL = 0xFFE = 4094).
         assert!(rules.contains("ip saddr 10.0.0.5 meta mark set 4094"));
@@ -1024,7 +1056,9 @@ mod tests {
     async fn test_live_full_cycle() {
         let mut m = TcManager::new("lo");
         m.init().await.unwrap();
-        m.limit_host(1, Ipv4Addr::new(127, 0, 0, 1), 1_000).await.unwrap();
+        m.limit_host(1, Ipv4Addr::new(127, 0, 0, 1), 1_000)
+            .await
+            .unwrap();
         assert_eq!(m.current_kbps(1), Some(1_000));
         m.remove_host(1).await.unwrap();
         assert!(!m.is_shaping(1));

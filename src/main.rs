@@ -2,13 +2,13 @@
 mod cli;
 mod forwarder;
 mod gateway_mode;
-mod mitm_auto;
 mod host;
+mod infra;
+mod mitm_auto;
 mod network;
 mod scanner;
 mod spoofer;
 mod utils;
-mod infra;
 
 #[cfg(test)]
 mod bdd;
@@ -34,15 +34,15 @@ use host::table::{HostId, HostState, HostTable};
 
 use spoofer::{SpoofTarget, SpooferCommand, SpooferEngine};
 
+use infra::components::{KernelState, NftGate};
+use infra::shutdown::ShutdownManager;
 use utils::check_root::check_root;
 use utils::gateway::get_gateway;
 use utils::ip_range::expand_one;
 use utils::logger::Logger;
-use utils::shutdown::spawn_shutdown_listener;
 use utils::oui::lookup_vendor;
+use utils::shutdown::spawn_shutdown_listener;
 use utils::tc::TcManager;
-use infra::components::{KernelState, NftGate};
-use infra::shutdown::ShutdownManager;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CLI
@@ -133,7 +133,9 @@ async fn enable_relay(
                 our_mac,
             };
             if let Err(e) = tx.send(ForwarderCommand::Enable(rule)).await {
-                logger.error_fmt(format_args!("Could not enable forwarding for host {id}: {e}"));
+                logger.error_fmt(format_args!(
+                    "Could not enable forwarding for host {id}: {e}"
+                ));
             } else {
                 logger.info_fmt(format_args!(
                     "Forwarding enabled for [{}] {}",
@@ -152,8 +154,6 @@ async fn enable_relay(
         }
     }
 }
-
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Main
@@ -359,91 +359,85 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Target selection ─────────────────────────────────────────────────────
 
     /// Prompts for bandwidth if not provided, returns the user's choice.
-fn resolve_bandwidth(
-    from_cli: Option<u64>,
-    logger: &mut Logger,
-) -> Option<u64> {
-    match from_cli {
-        Some(k) => {
-            logger.info_fmt(format_args!("Bandwidth (from args): {} kbps", k));
-            Some(k)
-        }
-        None => {
-            use std::io::Write;
-            print!(
-                "{}",
-                crate::paint!(
-                    &palette::KEYWORD,
-                    "Bandwidth cap in kbps per host (leave blank = unlimited): "
-                )
-            );
-            std::io::stdout().flush().unwrap();
-            
-            let mut buf = String::new();
-            match std::io::stdin().read_line(&mut buf) {
-                Ok(_) => {
-                    let result = TargetSelector::parse_bandwidth(buf.trim());
-                    match result {
-                        Some(kbps) => logger.info_fmt(format_args!(
-                            "Bandwidth limit: {} kbps per host", kbps
-                        )),
-                        None => logger.info_fmt(format_args!("No bandwidth limit.")),
+    fn resolve_bandwidth(from_cli: Option<u64>, logger: &mut Logger) -> Option<u64> {
+        match from_cli {
+            Some(k) => {
+                logger.info_fmt(format_args!("Bandwidth (from args): {} kbps", k));
+                Some(k)
+            }
+            None => {
+                use std::io::Write;
+                print!(
+                    "{}",
+                    crate::paint!(
+                        &palette::KEYWORD,
+                        "Bandwidth cap in kbps per host (leave blank = unlimited): "
+                    )
+                );
+                std::io::stdout().flush().unwrap();
+
+                let mut buf = String::new();
+                match std::io::stdin().read_line(&mut buf) {
+                    Ok(_) => {
+                        let result = TargetSelector::parse_bandwidth(buf.trim());
+                        match result {
+                            Some(kbps) => logger
+                                .info_fmt(format_args!("Bandwidth limit: {} kbps per host", kbps)),
+                            None => logger.info_fmt(format_args!("No bandwidth limit.")),
+                        }
+                        result
                     }
-                    result
-                }
-                Err(_) => {
-                    logger.error_fmt(format_args!("Failed to read input"));
-                    None
+                    Err(_) => {
+                        logger.error_fmt(format_args!("Failed to read input"));
+                        None
+                    }
                 }
             }
         }
     }
-}
 
-
-/// Resolves `--uplink <ip|mac>` to the IP of the device to exclude from
-/// victims in MITM mode. Falls back to `gateway_ip` when absent or unresolved.
-fn resolve_uplink(
-    table: &HostTable,
-    uplink: &Option<String>,
-    gateway_ip: Ipv4Addr,
-) -> Ipv4Addr {
-    let Some(hint) = uplink else {
-        return gateway_ip;
-    };
-    if let Ok(ip) = hint.parse::<Ipv4Addr>() {
-        if table.get_by_ip(ip).is_some() {
-            return ip;
+    /// Resolves `--uplink <ip|mac>` to the IP of the device to exclude from
+    /// victims in MITM mode. Falls back to `gateway_ip` when absent or unresolved.
+    fn resolve_uplink(
+        table: &HostTable,
+        uplink: &Option<String>,
+        gateway_ip: Ipv4Addr,
+    ) -> Ipv4Addr {
+        let Some(hint) = uplink else {
+            return gateway_ip;
+        };
+        if let Ok(ip) = hint.parse::<Ipv4Addr>() {
+            if table.get_by_ip(ip).is_some() {
+                return ip;
+            }
+            return gateway_ip;
         }
-        return gateway_ip;
-    }
-    if let Some(mac) = parse_mac(hint) {
-        if let Some(entry) = table.get_by_mac(mac) {
-            return entry.host.ip;
+        if let Some(mac) = parse_mac(hint) {
+            if let Some(entry) = table.get_by_mac(mac) {
+                return entry.host.ip;
+            }
         }
+        gateway_ip
     }
-    gateway_ip
-}
 
-/// Parses a colon-separated MAC ("00:11:22:33:44:55") into `MacAddr`.
-fn parse_mac(s: &str) -> Option<MacAddr> {
-    let mut octets = [0u8; 6];
-    let mut i = 0;
-    for part in s.split(':') {
-        if i >= 6 {
+    /// Parses a colon-separated MAC ("00:11:22:33:44:55") into `MacAddr`.
+    fn parse_mac(s: &str) -> Option<MacAddr> {
+        let mut octets = [0u8; 6];
+        let mut i = 0;
+        for part in s.split(':') {
+            if i >= 6 {
+                return None;
+            }
+            octets[i] = u8::from_str_radix(part, 16).ok()?;
+            i += 1;
+        }
+        if i != 6 {
             return None;
         }
-        octets[i] = u8::from_str_radix(part, 16).ok()?;
-        i += 1;
+        Some(MacAddr::new(
+            octets[0], octets[1], octets[2], octets[3], octets[4], octets[5],
+        ))
     }
-    if i != 6 {
-        return None;
-    }
-    Some(MacAddr::new(
-        octets[0], octets[1], octets[2], octets[3], octets[4], octets[5],
-    ))
-}
-
 
     let excluded_ip = {
         let t = host_table.read().await;
@@ -455,11 +449,17 @@ fn parse_mac(s: &str) -> Option<MacAddr> {
             cli.uplink.as_deref().unwrap()
         ));
     } else if cli.uplink.is_some() {
-        logger.info_fmt(format_args!("Excluding uplink {} from victims.", excluded_ip));
+        logger.info_fmt(format_args!(
+            "Excluding uplink {} from victims.",
+            excluded_ip
+        ));
     }
 
     let selection = if bypass_mode {
-        let ids: Vec<_> = host_table.read().await.iter()
+        let ids: Vec<_> = host_table
+            .read()
+            .await
+            .iter()
             .filter(|e| e.host.ip != excluded_ip)
             .map(|e| e.id)
             .collect();
@@ -483,7 +483,10 @@ fn parse_mac(s: &str) -> Option<MacAddr> {
     } else if cli.all {
         // `--all` in MITM mode: auto-select every discovered host except the
         // uplink/gateway, then keep dynamically adding new arrivals at runtime.
-        let ids: Vec<_> = host_table.read().await.iter()
+        let ids: Vec<_> = host_table
+            .read()
+            .await
+            .iter()
             .filter(|e| e.host.ip != excluded_ip)
             .map(|e| e.id)
             .collect();
@@ -491,7 +494,10 @@ fn parse_mac(s: &str) -> Option<MacAddr> {
             logger.error_fmt(format_args!("No targets after discovery."));
             std::process::exit(1);
         }
-        logger.info_fmt(format_args!("Auto-select (--all): {} target(s).", ids.len()));
+        logger.info_fmt(format_args!(
+            "Auto-select (--all): {} target(s).",
+            ids.len()
+        ));
 
         // `--pool` overrides per-host bandwidth; skip the interactive prompt.
         let bandwidth_kbps = if cli.pool.is_some() {
@@ -589,7 +595,12 @@ fn parse_mac(s: &str) -> Option<MacAddr> {
                     shutdown_manager.shutdown().await;
                     std::process::exit(1);
                 }
-                match tc.as_mut().unwrap().limit_pool(pool_kbps, &victim_ips).await {
+                match tc
+                    .as_mut()
+                    .unwrap()
+                    .limit_pool(pool_kbps, &victim_ips)
+                    .await
+                {
                     Ok(()) => logger.info_fmt(format_args!(
                         "tc: {} client(s) share a {} kbps pool; attacker keeps the rest.",
                         victim_ips.len(),
@@ -615,7 +626,12 @@ fn parse_mac(s: &str) -> Option<MacAddr> {
                 let table = host_table.read().await;
                 for &id in &selection.host_ids {
                     if let Some(entry) = table.get_by_id(id) {
-                        match tc.as_mut().unwrap().limit_host(id, entry.host.ip, kbps).await {
+                        match tc
+                            .as_mut()
+                            .unwrap()
+                            .limit_host(id, entry.host.ip, kbps)
+                            .await
+                        {
                             Ok(()) => logger.info_fmt(format_args!(
                                 "tc: [{}] {} → {} kbps",
                                 id,
@@ -653,7 +669,8 @@ fn parse_mac(s: &str) -> Option<MacAddr> {
                     match PacketForwarder::new(our_mac, &interface_name, Arc::clone(&host_table)) {
                         Ok(f) => f,
                         Err(e2) => {
-                            logger.error_fmt(format_args!("Could not create packet forwarder: {e2}"));
+                            logger
+                                .error_fmt(format_args!("Could not create packet forwarder: {e2}"));
                             tc.as_mut().unwrap().cleanup().await;
                             shutdown_manager.shutdown().await;
                             std::process::exit(1);
@@ -699,7 +716,12 @@ fn parse_mac(s: &str) -> Option<MacAddr> {
     }
 
     // ── Spoofer ──────────────────────────────────────────────────────────────
-    let spoofer = SpooferEngine::new(our_mac, gateway_ip, &interface_name,Arc::clone(&host_table));
+    let spoofer = SpooferEngine::new(
+        our_mac,
+        gateway_ip,
+        &interface_name,
+        Arc::clone(&host_table),
+    );
 
     let spoof_tx = spoofer.command_sender();
     tokio::spawn(async move { spoofer.run().await });

@@ -80,21 +80,29 @@ mod tests {
         let cases: &[(&str, usize, &str, &str)] = &[
             // Single IP
             ("192.168.1.5", 1, "192.168.1.5", "192.168.1.5"),
-            ("10.0.0.1",    1, "10.0.0.1",    "10.0.0.1"),
+            ("10.0.0.1", 1, "10.0.0.1", "10.0.0.1"),
             // CIDR /30 → 2 host addresses
             ("10.0.0.0/30", 2, "10.0.0.1", "10.0.0.2"),
             // CIDR /29 → 6 host addresses
             ("10.0.0.0/29", 6, "10.0.0.1", "10.0.0.6"),
             // Last-octet range
-            ("10.0.0.1-3",  3, "10.0.0.1", "10.0.0.3"),
-            ("10.0.0.5-5",  1, "10.0.0.5", "10.0.0.5"),
+            ("10.0.0.1-3", 3, "10.0.0.1", "10.0.0.3"),
+            ("10.0.0.5-5", 1, "10.0.0.5", "10.0.0.5"),
         ];
 
         for &(input, expected_len, first, last) in cases {
             let result = expand_one(input).unwrap_or_else(|e| panic!("'{input}' failed: {e}"));
             assert_eq!(result.len(), expected_len, "len mismatch for '{input}'");
-            assert_eq!(result.first().unwrap().to_string(), first, "first IP mismatch for '{input}'");
-            assert_eq!(result.last().unwrap().to_string(), last, "last IP mismatch for '{input}'");
+            assert_eq!(
+                result.first().unwrap().to_string(),
+                first,
+                "first IP mismatch for '{input}'"
+            );
+            assert_eq!(
+                result.last().unwrap().to_string(),
+                last,
+                "last IP mismatch for '{input}'"
+            );
         }
     }
 
@@ -102,11 +110,11 @@ mod tests {
     #[test]
     fn test_expand_one_invalid_inputs() {
         let cases = [
-            ("not_an_ip",      "garbage string"),
-            ("10.0.0.5-3",     "reversed range"),
-            ("999.0.0.1",      "invalid octet"),
-            ("10.0.0.0/31",    "prefix too large for IpRange"),
-            ("",               "empty string"),
+            ("not_an_ip", "garbage string"),
+            ("10.0.0.5-3", "reversed range"),
+            ("999.0.0.1", "invalid octet"),
+            ("10.0.0.0/31", "prefix too large for IpRange"),
+            ("", "empty string"),
         ];
 
         for (input, reason) in cases {

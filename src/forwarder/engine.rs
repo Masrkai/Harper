@@ -423,8 +423,8 @@ fn ip_checksum(header: &[u8]) -> u16 {
 mod tests {
     use super::*;
     use crate::forwarder::mock::{
-        make_arp_frame, make_ipv4_frame, make_ipv4_frame_padded, make_ipv6_frame,
-        MockSender, OLD_DST_MAC, OLD_SRC_MAC, OUR_MAC, write_eth_header,
+        MockSender, OLD_DST_MAC, OLD_SRC_MAC, OUR_MAC, make_arp_frame, make_ipv4_frame,
+        make_ipv4_frame_padded, make_ipv6_frame, write_eth_header,
     };
     use pnet::packet::Packet;
     use pnet::packet::ethernet::EthernetPacket;

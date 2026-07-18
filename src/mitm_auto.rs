@@ -18,16 +18,16 @@ use crate::scanner::engine::should_ignore_passive_frame;
 use crate::spoofer::{SpoofTarget, SpooferCommand};
 use crate::utils::tc::TcManager;
 use pnet::datalink::{self, Channel, DataLinkReceiver};
+use pnet::packet::Packet;
 use pnet::packet::arp::ArpPacket;
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
-use pnet::packet::Packet;
 use pnet::util::MacAddr;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, Mutex, RwLock, oneshot};
+use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 
 /// How long a managed victim may stay silent before it is evicted from the MITM.
 const STALE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -118,7 +118,9 @@ impl MitmAutoManager {
         let sniffer = match Self::open_receiver(&self.interface_name) {
             Some(rx) => rx,
             None => {
-                eprintln!("[!] Auto-MITM: could not open sniff socket — dynamic discovery disabled.");
+                eprintln!(
+                    "[!] Auto-MITM: could not open sniff socket — dynamic discovery disabled."
+                );
                 // Still honour the stop signal so shutdown works.
                 let _ = stop_rx.await;
                 return;
@@ -128,13 +130,7 @@ impl MitmAutoManager {
         let sniff_stop = Arc::new(AtomicBool::new(false));
         let local_ip = self.our_ip;
         let local_mac = self.our_mac;
-        Self::spawn_sniffer(
-            sniffer,
-            evt_tx,
-            sniff_stop.clone(),
-            local_ip,
-            local_mac,
-        );
+        Self::spawn_sniffer(sniffer, evt_tx, sniff_stop.clone(), local_ip, local_mac);
 
         let mut sweep = tokio::time::interval(SWEEP_INTERVAL);
 
@@ -171,14 +167,13 @@ impl MitmAutoManager {
 
         let id = {
             let mut table = self.host_table.write().await;
-            table
-                .insert(DiscoveredHost {
-                    ip,
-                    mac,
-                    hostname: None,
-                    vendor: None,
-                    last_seen: Instant::now(),
-                })
+            table.insert(DiscoveredHost {
+                ip,
+                mac,
+                hostname: None,
+                vendor: None,
+                last_seen: Instant::now(),
+            })
         };
 
         if self.managed.contains_key(&id) {
@@ -191,10 +186,7 @@ impl MitmAutoManager {
 
         self.add_victim(id, ip, mac).await;
         self.managed.insert(id, Instant::now());
-        println!(
-            "[+] Auto-MITM: added victim [{}] {} ({})",
-            id, ip, mac
-        );
+        println!("[+] Auto-MITM: added victim [{}] {} ({})", id, ip, mac);
     }
 
     /// Wires a freshly-discovered victim into poison + forward + shape.
@@ -308,12 +300,7 @@ impl MitmAutoManager {
                         let sender_mac = arp.get_sender_hw_addr();
 
                         // Ignore our own frames, broadcasts, and zero MACs.
-                        if should_ignore_passive_frame(
-                            sender_ip,
-                            sender_mac,
-                            local_ip,
-                            local_mac,
-                        ) {
+                        if should_ignore_passive_frame(sender_ip, sender_mac, local_ip, local_mac) {
                             continue;
                         }
 
@@ -363,7 +350,11 @@ mod tests {
         let (mut mgr, table) = make_manager();
 
         // A brand-new device appears.
-        mgr.on_seen(Ipv4Addr::new(192, 168, 1, 50), MacAddr::new(0xAA, 0, 0, 0, 0, 50)).await;
+        mgr.on_seen(
+            Ipv4Addr::new(192, 168, 1, 50),
+            MacAddr::new(0xAA, 0, 0, 0, 0, 50),
+        )
+        .await;
 
         let t = table.read().await;
         assert!(t.get_by_ip(Ipv4Addr::new(192, 168, 1, 50)).is_some());
@@ -374,7 +365,11 @@ mod tests {
     async fn test_on_seen_ignores_excluded_gateway() {
         let (mut mgr, table) = make_manager();
 
-        mgr.on_seen(Ipv4Addr::new(192, 168, 1, 1), MacAddr::new(0, 0, 0, 0, 0, 1)).await;
+        mgr.on_seen(
+            Ipv4Addr::new(192, 168, 1, 1),
+            MacAddr::new(0, 0, 0, 0, 0, 1),
+        )
+        .await;
 
         let t = table.read().await;
         assert!(t.get_by_ip(Ipv4Addr::new(192, 168, 1, 1)).is_none());

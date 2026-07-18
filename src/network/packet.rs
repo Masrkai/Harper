@@ -51,10 +51,13 @@ pub struct ArpRequest {
     pub sender_mac: MacAddr,
 }
 
-
 impl ArpRequest {
     pub fn new(target_ip: Ipv4Addr, sender_ip: Ipv4Addr, sender_mac: MacAddr) -> Self {
-        Self { target_ip, sender_ip, sender_mac }
+        Self {
+            target_ip,
+            sender_ip,
+            sender_mac,
+        }
     }
 
     pub fn to_bytes(&self) -> [u8; 42] {
@@ -77,7 +80,10 @@ pub struct GratuitousArp {
 
 impl GratuitousArp {
     pub fn new(claimed_ip: Ipv4Addr, our_mac: MacAddr) -> Self {
-        Self { claimed_ip, our_mac }
+        Self {
+            claimed_ip,
+            our_mac,
+        }
     }
 
     pub fn to_bytes(&self) -> [u8; 42] {
@@ -107,7 +113,12 @@ impl ArpPoison {
         spoofed_ip: Ipv4Addr,
         our_mac: MacAddr,
     ) -> Self {
-        Self { target_mac, target_ip, spoofed_ip, our_mac }
+        Self {
+            target_mac,
+            target_ip,
+            spoofed_ip,
+            our_mac,
+        }
     }
 
     pub fn to_bytes(&self) -> [u8; 42] {
@@ -137,7 +148,12 @@ impl ArpRestore {
         real_ip: Ipv4Addr,
         real_mac: MacAddr,
     ) -> Self {
-        Self { target_mac, target_ip, real_ip, real_mac }
+        Self {
+            target_mac,
+            target_ip,
+            real_ip,
+            real_mac,
+        }
     }
 
     pub fn to_bytes(&self) -> [u8; 42] {
@@ -190,12 +206,12 @@ mod tests {
     use pnet::packet::arp::{ArpOperations, ArpPacket};
     use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
 
-    const LOCAL_MAC:   MacAddr   = MacAddr(0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF);
-    const VICTIM_MAC:  MacAddr   = MacAddr(0x11, 0x22, 0x33, 0x44, 0x55, 0x66);
-    const GATEWAY_MAC: MacAddr   = MacAddr(0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01);
-    const LOCAL_IP:    Ipv4Addr  = Ipv4Addr::new(192, 168, 1, 100);
-    const VICTIM_IP:   Ipv4Addr  = Ipv4Addr::new(192, 168, 1, 10);
-    const GATEWAY_IP:  Ipv4Addr  = Ipv4Addr::new(192, 168, 1, 1);
+    const LOCAL_MAC: MacAddr = MacAddr(0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF);
+    const VICTIM_MAC: MacAddr = MacAddr(0x11, 0x22, 0x33, 0x44, 0x55, 0x66);
+    const GATEWAY_MAC: MacAddr = MacAddr(0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01);
+    const LOCAL_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 1, 100);
+    const VICTIM_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 1, 10);
+    const GATEWAY_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 1, 1);
 
     // Returns the ARP payload bytes from a raw frame so callers can construct
     // an ArpPacket with a lifetime tied to the frame, not a temporary.
@@ -210,10 +226,28 @@ mod tests {
     // ── Frame size: every builder must produce exactly 42 bytes ───────────────
     #[test]
     fn test_all_builders_produce_42_bytes() {
-        assert_eq!(ArpRequest::new(VICTIM_IP, LOCAL_IP, LOCAL_MAC).to_bytes().len(), 42);
-        assert_eq!(ArpPoison::new(VICTIM_MAC, VICTIM_IP, GATEWAY_IP, LOCAL_MAC).to_bytes().len(), 42);
-        assert_eq!(ArpRestore::new(VICTIM_MAC, VICTIM_IP, GATEWAY_IP, GATEWAY_MAC).to_bytes().len(), 42);
-        assert_eq!(GratuitousArp::new(VICTIM_IP, LOCAL_MAC).to_bytes().len(), 42);
+        assert_eq!(
+            ArpRequest::new(VICTIM_IP, LOCAL_IP, LOCAL_MAC)
+                .to_bytes()
+                .len(),
+            42
+        );
+        assert_eq!(
+            ArpPoison::new(VICTIM_MAC, VICTIM_IP, GATEWAY_IP, LOCAL_MAC)
+                .to_bytes()
+                .len(),
+            42
+        );
+        assert_eq!(
+            ArpRestore::new(VICTIM_MAC, VICTIM_IP, GATEWAY_IP, GATEWAY_MAC)
+                .to_bytes()
+                .len(),
+            42
+        );
+        assert_eq!(
+            GratuitousArp::new(VICTIM_IP, LOCAL_MAC).to_bytes().len(),
+            42
+        );
     }
 
     // ── ArpRequest ────────────────────────────────────────────────────────────
@@ -223,14 +257,26 @@ mod tests {
         let eth = EthernetPacket::new(&frame).unwrap();
         let arp = arp_of(&frame);
 
-        assert_eq!(eth.get_destination(), MacAddr::broadcast(), "eth dst must be broadcast");
-        assert_eq!(eth.get_source(),      LOCAL_MAC,            "eth src must be sender MAC");
-        assert_eq!(eth.get_ethertype(),   EtherTypes::Arp,      "ethertype must be ARP");
-        assert_eq!(arp.get_operation(),   ArpOperations::Request);
-        assert_eq!(arp.get_sender_hw_addr(),    LOCAL_MAC);
+        assert_eq!(
+            eth.get_destination(),
+            MacAddr::broadcast(),
+            "eth dst must be broadcast"
+        );
+        assert_eq!(eth.get_source(), LOCAL_MAC, "eth src must be sender MAC");
+        assert_eq!(
+            eth.get_ethertype(),
+            EtherTypes::Arp,
+            "ethertype must be ARP"
+        );
+        assert_eq!(arp.get_operation(), ArpOperations::Request);
+        assert_eq!(arp.get_sender_hw_addr(), LOCAL_MAC);
         assert_eq!(arp.get_sender_proto_addr(), LOCAL_IP);
         assert_eq!(arp.get_target_proto_addr(), VICTIM_IP);
-        assert_eq!(arp.get_target_hw_addr(),    MacAddr::zero(), "target MAC unknown = zero");
+        assert_eq!(
+            arp.get_target_hw_addr(),
+            MacAddr::zero(),
+            "target MAC unknown = zero"
+        );
     }
 
     // ── ArpPoison ─────────────────────────────────────────────────────────────
@@ -241,13 +287,13 @@ mod tests {
         let eth = EthernetPacket::new(&frame).unwrap();
         let arp = arp_of(&frame);
 
-        assert_eq!(eth.get_destination(), VICTIM_MAC,          "eth dst = victim");
-        assert_eq!(eth.get_source(),      LOCAL_MAC,           "eth src = us");
-        assert_eq!(arp.get_operation(),   ArpOperations::Reply);
+        assert_eq!(eth.get_destination(), VICTIM_MAC, "eth dst = victim");
+        assert_eq!(eth.get_source(), LOCAL_MAC, "eth src = us");
+        assert_eq!(arp.get_operation(), ArpOperations::Reply);
         // The lie: victim will cache GATEWAY_IP → LOCAL_MAC
-        assert_eq!(arp.get_sender_hw_addr(),    LOCAL_MAC);
+        assert_eq!(arp.get_sender_hw_addr(), LOCAL_MAC);
         assert_eq!(arp.get_sender_proto_addr(), GATEWAY_IP);
-        assert_eq!(arp.get_target_hw_addr(),    VICTIM_MAC);
+        assert_eq!(arp.get_target_hw_addr(), VICTIM_MAC);
         assert_eq!(arp.get_target_proto_addr(), VICTIM_IP);
     }
 
@@ -257,9 +303,9 @@ mod tests {
         let frame = ArpPoison::new(GATEWAY_MAC, GATEWAY_IP, VICTIM_IP, LOCAL_MAC).to_bytes();
         let arp = arp_of(&frame);
 
-        assert_eq!(arp.get_sender_hw_addr(),    LOCAL_MAC);
+        assert_eq!(arp.get_sender_hw_addr(), LOCAL_MAC);
         assert_eq!(arp.get_sender_proto_addr(), VICTIM_IP);
-        assert_eq!(arp.get_target_hw_addr(),    GATEWAY_MAC);
+        assert_eq!(arp.get_target_hw_addr(), GATEWAY_MAC);
         assert_eq!(arp.get_target_proto_addr(), GATEWAY_IP);
     }
 
@@ -271,17 +317,17 @@ mod tests {
         let eth = EthernetPacket::new(&frame).unwrap();
         let arp = arp_of(&frame);
 
-        assert_eq!(eth.get_destination(), VICTIM_MAC,           "eth dst = victim");
-        assert_eq!(eth.get_source(),      GATEWAY_MAC,          "eth src = real owner");
-        assert_eq!(arp.get_operation(),   ArpOperations::Reply);
-        assert_eq!(arp.get_sender_hw_addr(),    GATEWAY_MAC,    "truth: gateway MAC");
-        assert_eq!(arp.get_sender_proto_addr(), GATEWAY_IP,     "truth: gateway IP");
+        assert_eq!(eth.get_destination(), VICTIM_MAC, "eth dst = victim");
+        assert_eq!(eth.get_source(), GATEWAY_MAC, "eth src = real owner");
+        assert_eq!(arp.get_operation(), ArpOperations::Reply);
+        assert_eq!(arp.get_sender_hw_addr(), GATEWAY_MAC, "truth: gateway MAC");
+        assert_eq!(arp.get_sender_proto_addr(), GATEWAY_IP, "truth: gateway IP");
     }
 
     // Poison and Restore for the same addresses must differ
     #[test]
     fn test_poison_and_restore_differ() {
-        let poison  = ArpPoison::new(VICTIM_MAC, VICTIM_IP, GATEWAY_IP, LOCAL_MAC).to_bytes();
+        let poison = ArpPoison::new(VICTIM_MAC, VICTIM_IP, GATEWAY_IP, LOCAL_MAC).to_bytes();
         let restore = ArpRestore::new(VICTIM_MAC, VICTIM_IP, GATEWAY_IP, GATEWAY_MAC).to_bytes();
         assert_ne!(poison, restore);
     }
@@ -290,18 +336,19 @@ mod tests {
     #[test]
     fn test_arp_reply_parses_valid_reply_frames() {
         // Both Poison and Restore are Reply frames; parser must accept both
-        let poison_frame  = ArpPoison::new(VICTIM_MAC, VICTIM_IP, GATEWAY_IP, LOCAL_MAC).to_bytes();
-        let restore_frame = ArpRestore::new(VICTIM_MAC, VICTIM_IP, GATEWAY_IP, GATEWAY_MAC).to_bytes();
+        let poison_frame = ArpPoison::new(VICTIM_MAC, VICTIM_IP, GATEWAY_IP, LOCAL_MAC).to_bytes();
+        let restore_frame =
+            ArpRestore::new(VICTIM_MAC, VICTIM_IP, GATEWAY_IP, GATEWAY_MAC).to_bytes();
 
         let r = ArpReply::from_bytes(&poison_frame).expect("poison frame must parse");
         assert_eq!(r.sender_mac, LOCAL_MAC);
-        assert_eq!(r.sender_ip,  GATEWAY_IP);
+        assert_eq!(r.sender_ip, GATEWAY_IP);
         assert_eq!(r.target_mac, VICTIM_MAC);
-        assert_eq!(r.target_ip,  VICTIM_IP);
+        assert_eq!(r.target_ip, VICTIM_IP);
 
         let r = ArpReply::from_bytes(&restore_frame).expect("restore frame must parse");
         assert_eq!(r.sender_mac, GATEWAY_MAC);
-        assert_eq!(r.sender_ip,  GATEWAY_IP);
+        assert_eq!(r.sender_ip, GATEWAY_IP);
     }
 
     #[test]
@@ -310,9 +357,9 @@ mod tests {
         let request_frame = ArpRequest::new(VICTIM_IP, LOCAL_IP, LOCAL_MAC).to_bytes();
         let cases: &[(&[u8], &str)] = &[
             (&request_frame, "Request frame (not Reply)"),
-            (&[0u8; 20],    "too short (20 bytes)"),
-            (&[0u8; 42],    "all-zero buffer (EtherType 0x0000)"),
-            (&[],           "empty slice"),
+            (&[0u8; 20], "too short (20 bytes)"),
+            (&[0u8; 42], "all-zero buffer (EtherType 0x0000)"),
+            (&[], "empty slice"),
         ];
         for &(data, reason) in cases {
             assert!(

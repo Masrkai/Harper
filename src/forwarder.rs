@@ -1,5 +1,5 @@
-pub mod engine;
 pub mod ebpf;
+pub mod engine;
 #[cfg(test)]
 pub(crate) mod mock;
 
@@ -9,7 +9,7 @@ use crate::host::table::HostId;
 use pnet::datalink::MacAddr;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 /// Abstraction over the two MITM relay backends:
 /// - `Userspace`: the legacy pnet `PacketForwarder` (default).

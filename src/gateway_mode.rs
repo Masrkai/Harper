@@ -27,12 +27,12 @@ use crate::utils::tc::TcManager;
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub struct GatewayModeConfig {
-    pub interface:      Option<String>,
+    pub interface: Option<String>,
     pub bandwidth_kbps: Option<u64>,
-    pub targets:        Vec<String>,
-    pub all:            bool,
-    pub pool_kbps:      Option<u64>,
-    pub uplink:         Option<String>,
+    pub targets: Vec<String>,
+    pub all: bool,
+    pub pool_kbps: Option<u64>,
+    pub uplink: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -41,14 +41,20 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
     let mut logger = Logger::new();
 
     logger.info_fmt(format_args!(
-        "{}", palette::OK.paint("Gateway mode — shaping clients on a network you host")
+        "{}",
+        palette::OK.paint("Gateway mode — shaping clients on a network you host")
     ));
-    logger.info_fmt(format_args!("No ARP poisoning. Kernel routing handles forwarding."));
+    logger.info_fmt(format_args!(
+        "No ARP poisoning. Kernel routing handles forwarding."
+    ));
 
     // ── Interface selection ──────────────────────────────────────────────────
     let interface_name = match cfg.interface {
         Some(ref name) => {
-            logger.info_fmt(format_args!("Interface (from args): {}", palette::KEYWORD.paint(name)));
+            logger.info_fmt(format_args!(
+                "Interface (from args): {}",
+                palette::KEYWORD.paint(name)
+            ));
             name.clone()
         }
         None => match InterfaceSelector::select(true) {
@@ -84,8 +90,7 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
         // Cache-first: the kernel already knows every client it forwards for.
         // An active scan is only a fallback for when the neighbour cache is
         // empty (e.g. no client has sent a packet yet).
-        let cached =
-            crate::utils::neighbors::discover_via_cache(&interface_name, our_ip);
+        let cached = crate::utils::neighbors::discover_via_cache(&interface_name, our_ip);
 
         if !cached.is_empty() {
             logger.info_fmt(format_args!(
@@ -94,8 +99,7 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
             ));
             (cached, false)
         } else {
-            let cidr =
-                get_cidr(&interface_name).ok_or("could not determine CIDR for interface")?;
+            let cidr = get_cidr(&interface_name).ok_or("could not determine CIDR for interface")?;
             let range = IpRange::from_cidr(&cidr)?;
             logger.info_fmt(format_args!(
                 "ARP cache empty — scanning {} → {}",
@@ -104,13 +108,19 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
             ));
 
             logger.info_fmt(format_args!("Passive ARP sniff (5 s)…"));
-            let passive = scanner.passive_sniff(std::time::Duration::from_secs(5)).await?;
+            let passive = scanner
+                .passive_sniff(std::time::Duration::from_secs(5))
+                .await?;
 
             let mut d = scanner.scan(range).await?;
             d.extend(passive);
 
             logger.info_fmt(format_args!("Post-scan passive sniff (3 s)…"));
-            d.extend(scanner.passive_sniff(std::time::Duration::from_secs(3)).await?);
+            d.extend(
+                scanner
+                    .passive_sniff(std::time::Duration::from_secs(3))
+                    .await?,
+            );
             (d, false)
         }
     };
@@ -128,7 +138,9 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
     {
         let mut t = host_table.write().await;
         for host in discovered {
-            if host.ip == our_ip { continue; }
+            if host.ip == our_ip {
+                continue;
+            }
             t.insert(host);
         }
         t.reindex_by_ip();
@@ -156,7 +168,8 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
             ));
         } else {
             logger.info_fmt(format_args!(
-                "Excluding uplink {} from victims.", excluded_ip
+                "Excluding uplink {} from victims.",
+                excluded_ip
             ));
         }
     }
@@ -185,7 +198,10 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
             None => prompt_bandwidth_once(),
         };
 
-        SelectionResult { host_ids: ids, bandwidth_kbps: kbps }
+        SelectionResult {
+            host_ids: ids,
+            bandwidth_kbps: kbps,
+        }
     } else if cfg.all {
         let ids: Vec<_> = host_table
             .read()
@@ -198,7 +214,10 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
             logger.error_fmt(format_args!("No clients to shape."));
             return Ok(());
         }
-        logger.info_fmt(format_args!("Auto-select (--all): {} target(s).", ids.len()));
+        logger.info_fmt(format_args!(
+            "Auto-select (--all): {} target(s).",
+            ids.len()
+        ));
 
         let kbps = match cfg.bandwidth_kbps {
             Some(k) => {
@@ -208,7 +227,10 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
             None => prompt_bandwidth_once(),
         };
 
-        SelectionResult { host_ids: ids, bandwidth_kbps: kbps }
+        SelectionResult {
+            host_ids: ids,
+            bandwidth_kbps: kbps,
+        }
     } else {
         let t = host_table.read().await;
         match TargetSelector::select(&t, excluded_ip) {
@@ -248,7 +270,8 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
             std::process::exit(1);
         }
         Ok(()) => logger.info_fmt(format_args!(
-            "tc: HTB + IFB shaping initialised on {}.", interface_name
+            "tc: HTB + IFB shaping initialised on {}.",
+            interface_name
         )),
     }
 
@@ -291,11 +314,14 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
             if let Some(entry) = table.get_by_id(id) {
                 match tc.limit_host(id, entry.host.ip, kbps).await {
                     Ok(()) => logger.info_fmt(format_args!(
-                        "tc: [{}] {} → {} kbps", id,
-                        palette::WARN.paint(&entry.host.ip.to_string()), kbps,
+                        "tc: [{}] {} → {} kbps",
+                        id,
+                        palette::WARN.paint(&entry.host.ip.to_string()),
+                        kbps,
                     )),
                     Err(e) => logger.error_fmt(format_args!(
-                        "tc limit_host [{}] {}: {e}", id, entry.host.ip,
+                        "tc limit_host [{}] {}: {e}",
+                        id, entry.host.ip,
                     )),
                 }
             }
@@ -311,7 +337,8 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
     let status_msg = if kbps > 0 {
         format!(
             "Shaping {} client(s) at {} kbps each. Press Ctrl-C or 'q' + Enter to stop.",
-            selection.host_ids.len(), kbps,
+            selection.host_ids.len(),
+            kbps,
         )
     } else {
         format!(
@@ -408,12 +435,12 @@ mod tests {
     #[test]
     fn test_config_fields() {
         let cfg = GatewayModeConfig {
-            interface:      Some("eth0".to_string()),
+            interface: Some("eth0".to_string()),
             bandwidth_kbps: Some(1024),
-            targets:        vec!["10.0.0.1".to_string()],
-            all:            false,
-            pool_kbps:      None,
-            uplink:         None,
+            targets: vec!["10.0.0.1".to_string()],
+            all: false,
+            pool_kbps: None,
+            uplink: None,
         };
         assert_eq!(cfg.interface.as_deref(), Some("eth0"));
         assert_eq!(cfg.bandwidth_kbps, Some(1024));
@@ -421,12 +448,12 @@ mod tests {
 
         // Empty targets → full scan path
         let empty = GatewayModeConfig {
-            interface:      None,
+            interface: None,
             bandwidth_kbps: None,
-            targets:        vec![],
-            all:            false,
-            pool_kbps:      None,
-            uplink:         None,
+            targets: vec![],
+            all: false,
+            pool_kbps: None,
+            uplink: None,
         };
         assert!(empty.targets.is_empty());
     }

@@ -43,7 +43,15 @@ fn main() {
     let mut cmd = Command::new("clang");
     // `-g` emits BTF debug info so aya 0.14 can parse the BTF-style `.maps`
     // definitions; without it the verifier rejects map fds.
-    cmd.args(["-O2", "-g", "-target", "bpf", "-c", "harper-ebpf/harper.bpf.c", "-o"]);
+    cmd.args([
+        "-O2",
+        "-g",
+        "-target",
+        "bpf",
+        "-c",
+        "harper-ebpf/harper.bpf.c",
+        "-o",
+    ]);
     cmd.arg(&obj);
     if let Some(inc) = find_libbpf_include() {
         cmd.arg("-I");

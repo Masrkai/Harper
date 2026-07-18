@@ -1,6 +1,6 @@
+use crate::infra::Cleanupable;
 use crate::utils::proc::read_proc;
 use std::process::Command;
-use crate::infra::Cleanupable;
 
 pub struct KernelState {
     pub ip_forward: Option<String>,
@@ -39,7 +39,10 @@ impl KernelState {
         restore_sysctl("/proc/sys/net/ipv4/ip_forward", self.ip_forward.as_deref());
         restore_sysctl(&redirect_path, self.send_redirects.as_deref());
         restore_sysctl("/proc/sys/net/ipv4/conf/all/send_redirects", Some("1\n"));
-        restore_sysctl("/proc/sys/net/ipv4/conf/all/rp_filter", self.rp_filter_all.as_deref());
+        restore_sysctl(
+            "/proc/sys/net/ipv4/conf/all/rp_filter",
+            self.rp_filter_all.as_deref(),
+        );
         restore_sysctl(
             &format!("/proc/sys/net/ipv4/conf/{}/rp_filter", self.interface),
             self.rp_filter_all.as_deref(),
@@ -62,7 +65,11 @@ fn restore_sysctl(path: &str, value: Option<&str>) {
 }
 
 impl Cleanupable for KernelState {
-    fn cleanup(&mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Box<dyn std::error::Error>>> + Send + '_>> {
+    fn cleanup(
+        &mut self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), Box<dyn std::error::Error>>> + Send + '_>,
+    > {
         let kernel_state = self;
         Box::pin(async move {
             kernel_state.restore();
@@ -124,7 +131,11 @@ impl NftGate {
 }
 
 impl Cleanupable for NftGate {
-    fn cleanup(&mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Box<dyn std::error::Error>>> + Send + '_>> {
+    fn cleanup(
+        &mut self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), Box<dyn std::error::Error>>> + Send + '_>,
+    > {
         let nft_gate = self;
         Box::pin(async move {
             nft_gate.revoke();

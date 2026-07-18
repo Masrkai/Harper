@@ -9,9 +9,9 @@
 // victims are enabled/disabled.
 
 use crate::host::table::HostId;
-use aya::programs::tc::{SchedClassifier, TcAttachType};
-use aya::maps::{Array, HashMap};
 use aya::EbpfLoader;
+use aya::maps::{Array, HashMap};
+use aya::programs::tc::{SchedClassifier, TcAttachType};
 use pnet::datalink::MacAddr;
 use std::collections::HashMap as StdHashMap;
 use std::sync::Arc;
@@ -36,7 +36,9 @@ impl KernelRelay {
     pub fn attach(interface: &str, our_mac: MacAddr) -> Result<Self, Box<dyn std::error::Error>> {
         let obj_path = concat!(env!("OUT_DIR"), "/harper-ebpf.o");
         let bytes = std::fs::read(obj_path).map_err(|e| {
-            format!("eBPF object not found at {obj_path} ({e}). Was it compiled? Need clang in PATH.")
+            format!(
+                "eBPF object not found at {obj_path} ({e}). Was it compiled? Need clang in PATH."
+            )
         })?;
 
         // Independent ELF inspection so we can see exactly what aya's parser sees.
@@ -67,41 +69,41 @@ impl KernelRelay {
             }
         });
 
-
         // Attach the tc ingress program.
-// Load the tc program first — this triggers aya's map relocation pass,
-// so it must happen before take_map on either map.
-{
-    let prog: &mut SchedClassifier = bpf
-        .program_mut("harper_relay")
-        .ok_or("harper_relay program missing from eBPF object")?
-        .try_into()
-        .map_err(|e| format!("not a tc program: {e}"))?;
-    prog.load().map_err(|e| format!("failed to load tc program: {e}"))?;
-}
-// `prog`'s borrow of `bpf` ends here.
+        // Load the tc program first — this triggers aya's map relocation pass,
+        // so it must happen before take_map on either map.
+        {
+            let prog: &mut SchedClassifier = bpf
+                .program_mut("harper_relay")
+                .ok_or("harper_relay program missing from eBPF object")?
+                .try_into()
+                .map_err(|e| format!("not a tc program: {e}"))?;
+            prog.load()
+                .map_err(|e| format!("failed to load tc program: {e}"))?;
+        }
+        // `prog`'s borrow of `bpf` ends here.
 
-// Now safe to take_map — relocation already happened at load() time.
-{
-    let mut own_map: Array<aya::maps::MapData, [u8; ETH_ALEN]> =
-        Array::try_from(bpf.take_map("harper_own").ok_or("harper_own map missing")?)?;
-    own_map
-        .set(0, our_mac.octets(), 0)
-        .map_err(|e| format!("failed to set own MAC: {e}"))?;
-}
+        // Now safe to take_map — relocation already happened at load() time.
+        {
+            let mut own_map: Array<aya::maps::MapData, [u8; ETH_ALEN]> =
+                Array::try_from(bpf.take_map("harper_own").ok_or("harper_own map missing")?)?;
+            own_map
+                .set(0, our_mac.octets(), 0)
+                .map_err(|e| format!("failed to set own MAC: {e}"))?;
+        }
 
-let map: HashMap<aya::maps::MapData, [u8; ETH_ALEN], [u8; ETH_ALEN]> =
-    HashMap::try_from(bpf.take_map("harper_map").ok_or("harper_map map missing")?)?;
+        let map: HashMap<aya::maps::MapData, [u8; ETH_ALEN], [u8; ETH_ALEN]> =
+            HashMap::try_from(bpf.take_map("harper_map").ok_or("harper_map map missing")?)?;
 
-// Re-borrow `bpf` fresh for attach — separate borrow, no conflict.
-let prog: &mut SchedClassifier = bpf
-    .program_mut("harper_relay")
-    .ok_or("harper_relay program missing from eBPF object")?
-    .try_into()
-    .map_err(|e| format!("not a tc program: {e}"))?;
-let _link = prog
-    .attach(interface, TcAttachType::Ingress)
-    .map_err(|e| format!("failed to attach tc ingress on {interface}: {e}"))?;
+        // Re-borrow `bpf` fresh for attach — separate borrow, no conflict.
+        let prog: &mut SchedClassifier = bpf
+            .program_mut("harper_relay")
+            .ok_or("harper_relay program missing from eBPF object")?
+            .try_into()
+            .map_err(|e| format!("not a tc program: {e}"))?;
+        let _link = prog
+            .attach(interface, TcAttachType::Ingress)
+            .map_err(|e| format!("failed to attach tc ingress on {interface}: {e}"))?;
 
         println!("[+] kernel relay: attached eBPF tc ingress on {interface}");
 

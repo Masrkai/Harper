@@ -1,10 +1,10 @@
 use crate::host::table::DiscoveredHost;
-use crate::scanner::config::{ScanConfig, is_wireless_iface};
-use crate::utils::net::get_interface;
 use crate::network::{
     IpRange, NetworkError,
     packet::{ArpReply, ArpRequest},
 };
+use crate::scanner::config::{ScanConfig, is_wireless_iface};
+use crate::utils::net::get_interface;
 use pnet::datalink::{self, Channel, DataLinkReceiver, DataLinkSender, NetworkInterface};
 use pnet::util::MacAddr;
 use std::net::Ipv4Addr;
@@ -16,7 +16,6 @@ use std::{
 };
 use tokio::sync::{Mutex, watch};
 // use tokio::time::interval;
-
 
 /// Returns true if an ARP reply from the active scan should be recorded.
 /// Filters out replies that are outside our target range or not addressed to us.
@@ -57,7 +56,7 @@ pub struct ArpScanner {
 }
 
 impl ArpScanner {
-// ... (imports)
+    // ... (imports)
 
     pub async fn new(interface_name: &str) -> Result<Self, NetworkError> {
         let interface = get_interface(interface_name)
