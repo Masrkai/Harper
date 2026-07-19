@@ -36,6 +36,21 @@ rustPlatform.buildRustPackage {
   nativeBuildInputs = [ iproute2 nftables clang libbpf ];
   LIBBPF_INCLUDE = "${libbpf}/include";
 
+  # Testing
+  # --------
+  # Unit + BDD tests:   cargo test
+  # With coverage:      cargo llvm-cov nextest --ignore-filename-regex="rustc-"
+  # Root tests:         sudo cargo test -- --ignored  (not Nix-sandbox-safe)
+  #
+  # No checkPhase here because the --ignored tests (tc, nftables, raw sockets)
+  # need root and would fail in the Nix build sandbox. To run tests on a
+  # built package, use:
+  #   nix-shell -p harper --run 'harper --help'
+  #
+  # For local development testing with nix-build, create default-local.nix:
+  #   { lib, rustPlatform, ... }@args:
+  #   import ./default.nix (args // { src = lib.cleanSource ./.; })
+
   meta = with lib; {
     description = "bandwidth shaping and network traffic management tool with ebpf";
     license     = licenses.mit;
