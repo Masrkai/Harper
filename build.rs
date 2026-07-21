@@ -49,9 +49,9 @@ fn compile_ebpf(source: &str, out_name: &str, inc: Option<&PathBuf>) {
     match cmd.status() {
         Ok(s) if s.success() => {}
         Ok(s) => {
-            eprintln!(
-                "cargo:warning=eBPF build failed for {source} (clang exit {s}); \
-                 that backend will be unavailable at runtime. Set LIBBPF_INCLUDE if headers are elsewhere."
+            panic!(
+                "eBPF build failed for {source} (clang exit {s}); \
+                 fix the C source or ensure libbpf headers are available via LIBBPF_INCLUDE."
             );
         }
         Err(e) => {
