@@ -184,7 +184,7 @@ impl TcManager {
             "parent",
             "ffff:",
             "protocol",
-            "all",
+            "ip",
             "u32",
             "match",
             "u32",
