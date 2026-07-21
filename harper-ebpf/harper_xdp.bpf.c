@@ -86,5 +86,6 @@ int harper_relay(struct xdp_md *ctx)
     __builtin_memcpy(eth->h_dest, next, ETH_ALEN);
     __builtin_memcpy(eth->h_source, own, ETH_ALEN);
 
-    return bpf_redirect_map(&egress_iface_map, 0, 0);
+    bpf_redirect_map(&egress_iface_map, 0, 0);
+    return XDP_REDIRECT;
 }
