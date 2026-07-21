@@ -696,31 +696,34 @@ mod tests {
     #[test]
     fn test_for_interface_wlan_returns_wireless_config() {
         let cfg = ScanConfig::for_interface("wlan0");
-        // Wireless has more passes than ethernet.
-        assert!(
-            cfg.passes >= 5,
-            "wireless config should have ≥ 5 passes, got {}",
-            cfg.passes
+        assert_eq!(
+            cfg.passes,
+            ScanConfig::wireless().passes,
+            "wireless interface should return wireless config"
         );
+        assert!(cfg.pre_wake, "wireless config must have pre_wake enabled");
     }
 
     #[test]
     fn test_for_interface_eth_returns_ethernet_config() {
         let cfg = ScanConfig::for_interface("eth0");
-        // Ethernet config should have fewer passes than wireless.
-        let wlan_cfg = ScanConfig::for_interface("wlan0");
-        assert!(
-            cfg.passes < wlan_cfg.passes,
-            "ethernet should have fewer passes than wireless"
+        assert_eq!(
+            cfg.passes,
+            ScanConfig::ethernet().passes,
+            "ethernet interface should return ethernet config"
         );
+        assert!(!cfg.pre_wake, "ethernet config must not have pre_wake");
     }
 
     #[test]
     fn test_for_interface_enp_returns_ethernet_config() {
-        // enp* (PCI-Express NIC naming) should use ethernet config.
         let cfg = ScanConfig::for_interface("enp3s0");
-        let wlan_cfg = ScanConfig::for_interface("wlan0");
-        assert!(cfg.passes < wlan_cfg.passes);
+        assert_eq!(
+            cfg.passes,
+            ScanConfig::ethernet().passes,
+            "enp* PCI NIC should return ethernet config"
+        );
+        assert!(!cfg.pre_wake, "ethernet config must not have pre_wake");
     }
 
     // ── ScanConfig field sanity ───────────────────────────────────────────────

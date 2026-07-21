@@ -34,45 +34,53 @@ fn find_libbpf_include() -> Option<PathBuf> {
     None
 }
 
-fn main() {
-    println!("cargo:rerun-if-changed=harper-ebpf/harper.bpf.c");
-
+fn compile_ebpf(source: &str, out_name: &str, inc: Option<&PathBuf>) {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let obj = out_dir.join("harper-ebpf.o");
+    let obj = out_dir.join(out_name);
 
     let mut cmd = Command::new("clang");
-    // `-g` emits BTF debug info so aya 0.14 can parse the BTF-style `.maps`
-    // definitions; without it the verifier rejects map fds.
-    cmd.args([
-        "-O2",
-        "-g",
-        "-target",
-        "bpf",
-        "-c",
-        "harper-ebpf/harper.bpf.c",
-        "-o",
-    ]);
+    cmd.args(["-O2", "-g", "-target", "bpf", "-c", source, "-o"]);
     cmd.arg(&obj);
-    if let Some(inc) = find_libbpf_include() {
+    if let Some(inc) = inc {
         cmd.arg("-I");
         cmd.arg(inc);
     }
 
     match cmd.status() {
-        Ok(s) if s.success() => {
-            println!("cargo:rerun-if-env-changed=LIBBPF_INCLUDE");
-        }
+        Ok(s) if s.success() => {}
         Ok(s) => {
             eprintln!(
-                "cargo:warning=harper-ebpf build failed (clang exit {s}); \
-                 --kernel mode will be unavailable at runtime. Set LIBBPF_INCLUDE if headers are elsewhere."
+                "cargo:warning=eBPF build failed for {source} (clang exit {s}); \
+                 that backend will be unavailable at runtime. Set LIBBPF_INCLUDE if headers are elsewhere."
             );
         }
         Err(e) => {
             eprintln!(
-                "cargo:warning=clang not found ({e}); --kernel mode will be \
+                "cargo:warning=clang not found ({e}); eBPF backends will be \
                  unavailable at runtime. Add clang + libbpf to the build environment."
             );
         }
     }
+}
+
+fn main() {
+    println!("cargo:rerun-if-changed=harper-ebpf/harper_tc.bpf.c");
+    println!("cargo:rerun-if-changed=harper-ebpf/harper_legacy.bpf.c");
+    println!("cargo:rerun-if-changed=harper-ebpf/harper_xdp.bpf.c");
+    println!("cargo:rerun-if-env-changed=LIBBPF_INCLUDE");
+
+    let inc = find_libbpf_include();
+    let inc_ref = inc.as_ref();
+
+    compile_ebpf("harper-ebpf/harper_tc.bpf.c", "harper_tc-ebpf.o", inc_ref);
+    compile_ebpf(
+        "harper-ebpf/harper_legacy.bpf.c",
+        "harper_legacy-ebpf.o",
+        inc_ref,
+    );
+    compile_ebpf(
+        "harper-ebpf/harper_xdp.bpf.c",
+        "harper_xdp-ebpf.o",
+        inc_ref,
+    );
 }

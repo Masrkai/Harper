@@ -31,11 +31,10 @@ struct mac_key {
 
 /* key = 6-byte source MAC, value = 6-byte next-hop (rewrite) MAC. */
 struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
     __uint(key_size, ETH_ALEN);
     __uint(value_size, ETH_ALEN);
-    __uint(max_entries, 1024);
-    __uint(map_flags, BPF_F_NO_PREALLOC);
+    __uint(max_entries, 4096);
     __type(key, struct mac_key);
     __type(value, struct mac_key);
 } harper_map SEC(".maps");
@@ -79,7 +78,7 @@ int harper_relay(struct __sk_buff *skb)
 
     __u8 *next = bpf_map_lookup_elem(&harper_map, &key);
     if (!next)
-        return TC_ACT_OK;
+        return TC_ACT_SHOT;
 
     __builtin_memcpy(eth->h_dest, next, ETH_ALEN);
     __builtin_memcpy(eth->h_source, own, ETH_ALEN);

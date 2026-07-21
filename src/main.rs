@@ -28,7 +28,7 @@ use cli::selector::InterfaceSelector;
 use cli::target_selector::TargetSelector;
 
 use forwarder::engine::PacketForwarder;
-use forwarder::{ForwardRule, ForwarderCommand, RelayHandle};
+use forwarder::{ForwardRule, ForwarderCommand, RelayBackend, RelayHandle};
 
 use host::table::{HostId, HostState, HostTable};
 
@@ -104,12 +104,27 @@ struct Cli {
     #[arg(long, value_name = "IP|MAC")]
     uplink: Option<String>,
 
-    /// MITM mode: offload packet relay to an in-kernel eBPF tc program instead
-    /// of the userspace forwarder. Reduces per-packet copy / fragmentation
-    /// overhead. Requires a kernel with cls_bpf + the harper eBPF object built.
-    /// Incompatible with --gateway-mode (no relay there).
-    #[arg(long, default_value_t = false)]
+    /// MITM mode: prefer XDP eBPF relay. The fastest backend — operates
+    /// on raw DMA frames with no SKB allocation. Requires kernel + NIC
+    /// support. Error if unavailable (no fallback to tc).
+    #[arg(long, conflicts_with_all = &["kernel", "legacy", "userland", "gateway_mode"])]
+    xdp: bool,
+
+    /// MITM mode: use the in-kernel eBPF tc redirect relay (default).
+    /// Reduces per-packet copy overhead vs userspace. Falls back to
+    /// legacy tc (TC_ACT_OK) if redirect is unavailable.
+    #[arg(long, default_value_t = true, conflicts_with_all = &["xdp", "legacy", "userland"])]
     kernel: bool,
+
+    /// MITM mode: force legacy tc eBPF relay (TC_ACT_OK). No devmap
+    /// redirect. Useful for debugging or kernels without redirect support.
+    #[arg(long, conflicts_with_all = &["xdp", "kernel", "userland", "gateway_mode"])]
+    legacy: bool,
+
+    /// MITM mode: use the userspace PacketForwarder instead of the
+    /// default in-kernel eBPF relay.
+    #[arg(long, conflicts_with_all = &["xdp", "kernel", "legacy", "gateway_mode"])]
+    userland: bool,
 }
 
 /// Enables relay for a single victim on whichever backend `relay` wraps.
@@ -177,9 +192,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Gateway mode early dispatch ──────────────────────────────────────────
     // Must run before the MITM-specific scanner / interface setup below so we
     // don't open raw sockets or manipulate kernel state unnecessarily.
-    if cli.kernel && cli.gateway_mode {
+    // Note: --kernel is now the default; gateway mode ignores it since there's
+    // no MITM relay to perform. Gate against explicit --userland if the user
+    // tries to combine contradictory relay expectations with gateway mode.
+    if cli.userland && cli.gateway_mode {
         eprintln!(
-            "[!] --kernel (eBPF relay) is incompatible with --gateway-mode \
+            "[!] --userland (explicit userspace relay) is incompatible with --gateway-mode \
              (gateway mode does no MITM relay)."
         );
         std::process::exit(1);
@@ -652,13 +670,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // ── Packet forwarder ─────────────────────────────────────────────────────
-    // Two relay backends: the default userspace PacketForwarder, or an in-kernel
-    // eBPF tc program selected by --kernel. Both consume the same per-victim
-    // enable/disable events.
-    let relay: RelayHandle = if cli.kernel {
-        match crate::forwarder::ebpf::KernelRelay::attach(&interface_name, our_mac) {
+    // Three kernel relay backends plus userspace fallback:
+    //   --xdp       → XDP (error if unsupported)
+    //   --kernel    → tc redirect (default), falls back to tc legacy
+    //   --legacy    → tc legacy (TC_ACT_OK)
+    //   --userland  → userspace PacketForwarder
+    let relay_preference = if cli.xdp {
+        RelayBackend::Xdp
+    } else if cli.legacy {
+        RelayBackend::TcLegacy
+    } else {
+        RelayBackend::TcRedirect // default
+    };
+
+    let relay: RelayHandle = if cli.userland {
+        let forwarder =
+            match PacketForwarder::new(our_mac, &interface_name, Arc::clone(&host_table)) {
+                Ok(f) => f,
+                Err(e) => {
+                    logger.error_fmt(format_args!("Could not create packet forwarder: {e}"));
+                    tc.as_mut().unwrap().cleanup().await;
+                    shutdown_manager.shutdown().await;
+                    std::process::exit(1);
+                }
+            };
+        let fwd_tx = forwarder.command_sender();
+        tokio::spawn(async move { forwarder.run().await });
+        RelayHandle::Userspace(fwd_tx)
+    } else {
+        match crate::forwarder::ebpf::KernelRelay::attach_best_available(
+            &interface_name,
+            our_mac,
+            relay_preference,
+        ) {
             Ok(r) => {
-                println!("[*] Kernel eBPF relay active (--kernel).");
+                let label = match r.backend {
+                    RelayBackend::Xdp => "XDP",
+                    RelayBackend::TcRedirect => "tc redirect",
+                    RelayBackend::TcLegacy => "tc legacy",
+                };
+                println!("[*] Kernel eBPF relay active ({label}).");
                 RelayHandle::Kernel(Arc::new(tokio::sync::Mutex::new(r)))
             }
             Err(e) => {
@@ -681,20 +732,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 RelayHandle::Userspace(fwd_tx)
             }
         }
-    } else {
-        let forwarder =
-            match PacketForwarder::new(our_mac, &interface_name, Arc::clone(&host_table)) {
-                Ok(f) => f,
-                Err(e) => {
-                    logger.error_fmt(format_args!("Could not create packet forwarder: {e}"));
-                    tc.as_mut().unwrap().cleanup().await;
-                    shutdown_manager.shutdown().await;
-                    std::process::exit(1);
-                }
-            };
-        let fwd_tx = forwarder.command_sender();
-        tokio::spawn(async move { forwarder.run().await });
-        RelayHandle::Userspace(fwd_tx)
     };
 
     {

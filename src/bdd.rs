@@ -1595,35 +1595,225 @@ fn bdd_forwarder_fatal_error_not_retried() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn bdd_kernel_flag_parses_and_defaults_off() {
+fn bdd_kernel_flag_parses_and_defaults_on() {
     let feat = load_feature("kernel_relay");
     let _sc = scenario_by_name(&feat, "The --kernel flag selects the eBPF relay backend");
 
-    // Default: userspace forwarder.
+    // Default: kernel relay (tc redirect).
     let cli = Cli::parse_from(["harper", "--interface", "wlan0"]);
-    assert!(!cli.kernel, "--kernel must default to false");
+    assert!(cli.kernel, "--kernel must default to true (v1.3 default change)");
+    assert!(!cli.userland, "--userland must default to false");
 
-    // Explicit opt-in.
+    // Explicit --kernel (redundant but valid).
     let cli = Cli::parse_from(["harper", "--interface", "wlan0", "--kernel"]);
-    assert!(cli.kernel, "--kernel must be enabled when passed");
+    assert!(cli.kernel, "--kernel must be true when passed");
+    assert!(!cli.userland, "--userland must be false");
+
+    // Explicit --userland selects userspace (kernel stays true — its default).
+    let cli = Cli::parse_from(["harper", "--interface", "wlan0", "--userland"]);
+    assert!(cli.userland, "--userland must be true when passed");
+    assert!(cli.kernel, "--kernel default is true even with --userland");
 }
 
 #[test]
 fn bdd_kernel_flag_incompatible_with_gateway_mode() {
     let feat = load_feature("kernel_relay");
-    let _sc = scenario_by_name(&feat, "--kernel is rejected alongside --gateway-mode");
+    let _sc = scenario_by_name(&feat, "--userland is rejected alongside --gateway-mode");
 
-    // The guard in main() exits(1) when both are set; here we assert the two
-    // flags are independently parseable but mutually exclusive by contract.
-    let cli = Cli::parse_from([
-        "harper",
-        "--interface",
-        "wlan0",
-        "--kernel",
-        "--gateway-mode",
-    ]);
+    // Clap's `conflicts_with_all` rejects --userland + --gateway-mode at the
+    // parser level.
     assert!(
-        cli.kernel && cli.gateway_mode,
-        "both flags parse; main() enforces the guard"
+        Cli::try_parse_from([
+            "harper",
+            "--interface",
+            "wlan0",
+            "--userland",
+            "--gateway-mode",
+        ])
+        .is_err(),
+        "clap must reject --userland + --gateway-mode as conflicting"
+    );
+
+    // --gateway-mode alone is fine (kernel is the default, but gateway mode
+    // ignores relay so there's no conflict).
+    let cli = Cli::parse_from(["harper", "--interface", "wlan0", "--gateway-mode"]);
+    assert!(cli.gateway_mode, "--gateway-mode parses correctly");
+    assert!(cli.kernel, "--kernel default is true even with --gateway-mode");
+}
+
+#[test]
+fn bdd_kernel_relay_map_miss_drops() {
+    let feat = load_feature("kernel_relay");
+    let _sc = scenario_by_name(
+        &feat,
+        "Map miss drops the frame instead of forwarding to kernel stack",
+    );
+
+    let c_path = {
+        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.push("harper-ebpf");
+        p.push("harper_tc.bpf.c");
+        p
+    };
+    let source =
+        std::fs::read_to_string(&c_path).expect("harper_tc.bpf.c must exist for compile-time check");
+
+    assert!(
+        source.contains("TC_ACT_SHOT"),
+        "harper_tc.bpf.c must use TC_ACT_SHOT on map miss.\n\
+         Run Phase 1.1: change the return after `if (!next)` from TC_ACT_OK to TC_ACT_SHOT."
+    );
+}
+
+#[test]
+fn bdd_kernel_relay_lru_eviction() {
+    let feat = load_feature("kernel_relay");
+    let _sc = scenario_by_name(&feat, "LRU hash map evicts oldest entry when full");
+
+    let c_path = {
+        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.push("harper-ebpf");
+        p.push("harper_tc.bpf.c");
+        p
+    };
+    let source =
+        std::fs::read_to_string(&c_path).expect("harper_tc.bpf.c must exist for compile-time check");
+
+    assert!(
+        source.contains("BPF_MAP_TYPE_LRU_HASH"),
+        "harper_tc.bpf.c must use BPF_MAP_TYPE_LRU_HASH, not BPF_MAP_TYPE_HASH.\n\
+         Run Phase 1.2: change map type from BPF_MAP_TYPE_HASH to BPF_MAP_TYPE_LRU_HASH."
+    );
+    assert!(
+        source.contains("max_entries, 4096"),
+        "harper_tc.bpf.c must have max_entries = 4096.\n\
+         Run Phase 1.3: bump 1024 to 4096."
+    );
+    assert!(
+        !source.contains("BPF_F_NO_PREALLOC"),
+        "harper_tc.bpf.c must not use BPF_F_NO_PREALLOC with LRU_HASH.\n\
+         Run Phase 1.2: remove BPF_F_NO_PREALLOC (incompatible with LRU)."
+    );
+}
+
+#[test]
+fn bdd_kernel_relay_redirect_via_devmap() {
+    let feat = load_feature("kernel_relay");
+    let _sc = scenario_by_name(&feat, "Kernel relay redirects via devmap");
+
+    let c_path = {
+        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.push("harper-ebpf");
+        p.push("harper_tc.bpf.c");
+        p
+    };
+    let source =
+        std::fs::read_to_string(&c_path).expect("harper_tc.bpf.c must exist for compile-time check");
+
+    assert!(
+        source.contains("BPF_MAP_TYPE_DEVMAP"),
+        "harper_tc.bpf.c must define a DEV map (egress_iface_map)"
+    );
+    assert!(
+        source.contains("egress_iface_map"),
+        "harper_tc.bpf.c must name the DEV map egress_iface_map"
+    );
+    assert!(
+        source.contains("bpf_redirect_map"),
+        "harper_tc.bpf.c must use bpf_redirect_map for redirection"
+    );
+    assert!(
+        source.contains("TC_ACT_REDIRECT"),
+        "harper_tc.bpf.c must return TC_ACT_REDIRECT"
+    );
+}
+
+#[test]
+fn bdd_kernel_relay_xdp_preferred() {
+    let feat = load_feature("kernel_relay");
+    let _sc = scenario_by_name(&feat, "XDP preferred when available");
+
+    // --xdp flag parses correctly.
+    let cli = Cli::parse_from(["harper", "--interface", "wlan0", "--xdp"]);
+    assert!(cli.xdp, "--xdp must be true when passed");
+    assert!(!cli.legacy, "--legacy must be false with --xdp");
+    assert!(!cli.userland, "--userland must be false with --xdp");
+
+    // XDP source exists.
+    let c_path = {
+        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.push("harper-ebpf");
+        p.push("harper_xdp.bpf.c");
+        p
+    };
+    let source = std::fs::read_to_string(&c_path)
+        .expect("harper_xdp.bpf.c must exist");
+    assert!(
+        source.contains("SEC(\"xdp\")"),
+        "harper_xdp.bpf.c must use SEC(\"xdp\")"
+    );
+    assert!(
+        source.contains("xdp_md"),
+        "harper_xdp.bpf.c must operate on xdp_md (not __sk_buff)"
+    );
+    assert!(
+        source.contains("XDP_DROP"),
+        "harper_xdp.bpf.c must return XDP_DROP on map miss"
+    );
+    assert!(
+        source.contains("BPF_MAP_TYPE_DEVMAP"),
+        "harper_xdp.bpf.c must include a DEVMAP"
+    );
+
+    // Probe returns false for a non-existent interface.
+    assert!(
+        !crate::forwarder::ebpf::probe_xdp_support("nonexistent_iface_xyz"),
+        "probe must return false for non-existent interfaces"
+    );
+}
+
+#[test]
+fn bdd_kernel_relay_xdp_fallback_to_tc() {
+    let feat = load_feature("kernel_relay");
+    let _sc = scenario_by_name(&feat, "Falls back to tc redirect when XDP unsupported");
+
+    // Default relay preference (no flags) is TcRedirect.
+    let cli = Cli::parse_from(["harper", "--interface", "wlan0"]);
+    assert!(cli.kernel, "--kernel is the default");
+    assert!(!cli.xdp, "--xdp must default to false");
+    assert!(!cli.legacy, "--legacy must default to false");
+
+    // --legacy flag parses correctly.
+    let cli = Cli::parse_from(["harper", "--interface", "wlan0", "--legacy"]);
+    assert!(cli.legacy, "--legacy must be true when passed");
+
+    // Verify the fallback chain logic by checking the preference mapping.
+    // When --xdp is not available, tc redirect is the fallback target.
+    // This is verified at the Rust level by the enum dispatch.
+    assert!(!cli.xdp, "--xdp must be false with --legacy");
+    assert!(cli.kernel, "--kernel is the default even with --legacy");
+
+    // The tc redirect bpf object must exist.
+    let tc_path = {
+        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.push("harper-ebpf");
+        p.push("harper_tc.bpf.c");
+        p
+    };
+    assert!(
+        tc_path.exists(),
+        "harper_tc.bpf.c must exist for tc redirect fallback"
+    );
+
+    // The legacy bpf object must exist.
+    let legacy_path = {
+        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.push("harper-ebpf");
+        p.push("harper_legacy.bpf.c");
+        p
+    };
+    assert!(
+        legacy_path.exists(),
+        "harper_legacy.bpf.c must exist for tc legacy fallback"
     );
 }

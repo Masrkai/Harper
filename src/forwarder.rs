@@ -3,6 +3,7 @@ pub mod engine;
 #[cfg(test)]
 pub(crate) mod mock;
 
+pub use ebpf::RelayBackend;
 pub use engine::{ForwardRule, ForwarderCommand};
 
 use crate::host::table::HostId;
