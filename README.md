@@ -53,6 +53,16 @@ cargo test
 sudo cargo test -- --ignored
 ```
 
+### Integration test (requires root, iperf3, jq)
+
+```bash
+# Run all 9 integration scenarios (MITM + Gateway in netns)
+sudo ./scripts/netns-test.sh run all
+
+# Run a specific scenario
+sudo ./scripts/netns-test.sh run gateway_pool
+```
+
 ---
 
 ## Usage

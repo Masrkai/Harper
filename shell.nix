@@ -10,6 +10,10 @@ pkgs.mkShell {
     cargo-nextest
     cargo-llvm-cov
 
+    # Integration test dependencies
+    iperf3
+    jq
+
     # eBPF MITM relay (--kernel mode): clang compiles the object, libbpf
     # provides the bpf/linux headers the C source includes.
     clang
