@@ -555,7 +555,7 @@ impl TcManager {
             let classid = format!("{}:{}", major, slot_hex);
             let leaf_handle = format!("{:x}:", slot as u32 + 0x100);
 
-            run_check(&[
+            if let Err(e) = run(&[
                 "tc",
                 "class",
                 "add",
@@ -573,7 +573,12 @@ impl TcManager {
                 "burst",
                 &burst,
             ])
-            .await?;
+            .await {
+                if !e.to_string().contains("File exists") {
+                    return Err(format!("tc class add failed: {}", e).into());
+                }
+            }
+            
             run_check(&[
                 "tc",
                 "qdisc",
@@ -621,7 +626,7 @@ impl TcManager {
             let classid = format!("{}:{}", major, slot_hex);
             let leaf_handle = format!("{:x}:", slot as u32 + 0x200);
 
-            run_check(&[
+            if let Err(e) = run(&[
                 "tc",
                 "class",
                 "add",
@@ -639,7 +644,12 @@ impl TcManager {
                 "burst",
                 &burst,
             ])
-            .await?;
+            .await {
+                if !e.to_string().contains("File exists") {
+                    return Err(format!("tc class add failed: {}", e).into());
+                }
+            }
+
             run_check(&[
                 "tc",
                 "qdisc",
@@ -685,6 +695,8 @@ impl TcManager {
             let major = tree.trim_end_matches(':');
             let classid = format!("{}:{:x}", major, slot);
             let leaf_handle = format!("{:x}:", slot as u32 + 0x100);
+            
+            // Try to remove, but don't care if it fails (e.g. doesn't exist)
             let _ = run(&[
                 "tc",
                 "qdisc",
@@ -697,7 +709,10 @@ impl TcManager {
                 &leaf_handle,
             ])
             .await;
-            let _ = run(&["tc", "class", "del", "dev", dev, "classid", &classid]).await;
+            
+            if let Err(e) = run(&["tc", "class", "del", "dev", dev, "classid", &classid]).await {
+                println!("[*] tc: warning: failed to remove class {}: {}", classid, e);
+            }
         }
     }
 
