@@ -114,6 +114,7 @@ impl KernelRelay {
             )
         })?;
 
+        #[cfg(feature = "debug-ebpf")]
         Self::dump_elf(&bytes, &obj_path);
 
         let mut bpf = match EbpfLoader::new().load(&bytes) {
@@ -265,6 +266,7 @@ impl KernelRelay {
         }
     }
 
+    #[cfg(feature = "debug-ebpf")]
     fn dump_elf(bytes: &[u8], path: &str) {
         use object::{Object, ObjectSection, ObjectSymbol};
 
