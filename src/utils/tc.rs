@@ -46,7 +46,7 @@
 //
 //  Physical NIC egress (upload):
 //    root 1:  htb default 0xFFF
-//    └── 1:1  ceiling LINE_RATE
+//    └── 1:1  ceiling the link rate
 //        ├── 1:0xFFF  passthrough (all unmarked / host traffic)
 //        └── 1:<slot> per-host cap  ← fw handle <slot>
 //            └── sfq
@@ -58,7 +58,7 @@
 //
 //  ifb0 egress (download):
 //    root 2:  htb default 0xFFF
-//    └── 2:1  ceiling LINE_RATE
+//    └── 2:1  ceiling the link rate
 //        ├── 2:0xFFF  passthrough (unmarked / host-destined traffic)
 //        └── 2:<slot> per-host cap  ← fw handle <slot>  (mark set by nft FORWARD)
 //            └── sfq
@@ -88,7 +88,6 @@ impl Cleanupable for TcManager {
 }
 
 const IFB_DEV: &str = "ifb0";
-const LINE_RATE: &str = "1000mbit";
 const HANDLE_EGRESS: &str = "1:";
 const HANDLE_INGRESS: &str = "2:";
 const CLASS_ROOT_MINOR: u16 = 1;
@@ -101,7 +100,7 @@ const NFT_CHAIN: &str = "FORWARD";
 
 /// Single shared fwmark used by pool mode. Every victim IP is marked with this
 /// so all their traffic funnels into one shared HTB class; unmarked traffic
-/// (the attacker) keeps the rest of LINE_RATE via the passthrough class.
+/// (the attacker) keeps the rest of the link rate via the passthrough class.
 const MARK_POOL: u32 = 0xFFE;
 
 #[derive(Debug)]
@@ -139,6 +138,9 @@ pub struct TcManager {
     /// Pool mode uses one static HTB class (`MARK_POOL`). It is created once and
     /// only the nftables ruleset is refreshed thereafter; never recreated.
     pool_class_created: bool,
+    /// Discovered physical link rate in Mbit/s (from /sys/class/net/<iface>/speed),
+    /// used for the HTB root rate and victim `ceil` values.
+    line_rate_mbit: u64,
 }
 
 impl TcManager {
@@ -149,6 +151,7 @@ impl TcManager {
             hosts: HashMap::new(),
             next_slot: SLOT_MIN,
             pool_class_created: false,
+            line_rate_mbit: 1000,
         }
     }
 
@@ -156,6 +159,12 @@ impl TcManager {
         for module in &["ifb", "act_mirred", "sch_htb", "sch_sfq", "cls_fw"] {
             let _ = Command::new("modprobe").arg(module).output().await;
         }
+
+        self.line_rate_mbit = read_link_speed_mbit(&self.interface);
+        println!(
+            "[+] tc: link rate {} Mbit/s on {}",
+            self.line_rate_mbit, self.interface
+        );
 
         self.teardown_tc().await;
         self.teardown_nft().await;
@@ -308,7 +317,7 @@ impl TcManager {
     /// upload (egress) and download (ifb0) trees. All victim IPs are marked
     /// with the single shared `MARK_POOL` fwmark so their traffic funnels into
     /// that class; unmarked traffic (the attacker) keeps the rest of
-    /// `LINE_RATE` via the passthrough default class.
+    /// `the link rate` via the passthrough default class.
     ///
     /// The HTB class + fw filters are **static** (same rate, same mark), so the
     /// class is created exactly once. Re-applying the pool — which happens on
@@ -316,6 +325,11 @@ impl TcManager {
     /// ruleset that decides *which* IPs carry the mark. This avoids the prior
     /// bug where the class was deleted+recreated each call and the kernel
     /// rejected the recreate with `RTNETLINK answers: File exists`.
+    ///
+    /// `line_rate_mbit` is discovered at `init()` time from
+    /// `/sys/class/net/<iface>/speed` (falling back to 1000 Mbit/s) so the HTB
+    /// root and victim `ceil` values track the real physical link instead of a
+    /// hardcoded assumption.
     pub async fn limit_pool(
         &mut self,
         pool_kbps: u64,
@@ -400,6 +414,7 @@ impl TcManager {
         let major = handle.trim_end_matches(':');
         let root_class = format!("{}:1", major);
         let pass_class = format!("{}:{:x}", major, SLOT_PASSTHROUGH);
+        let line_rate = self.line_rate_str();
 
         run_check(&[
             "tc",
@@ -413,7 +428,9 @@ impl TcManager {
             &root_class,
             "htb",
             "rate",
-            LINE_RATE,
+            line_rate.as_str(),
+            "ceil",
+            line_rate.as_str(),
         ])
         .await?;
         run_check(&[
@@ -428,7 +445,9 @@ impl TcManager {
             &pass_class,
             "htb",
             "rate",
-            LINE_RATE,
+            line_rate.as_str(),
+            "ceil",
+            line_rate.as_str(),
         ])
         .await?;
         Ok(())
@@ -508,6 +527,11 @@ impl TcManager {
         let burst = burst_for(kbps);
         let slot_hex = format!("{:x}", slot);
         let slot_str = format!("{}", slot);
+        // Victim leaves keep their guaranteed `rate` (the kbps cap) but are
+        // allowed to `ceil` up to the full link rate so they can borrow spare
+        // bandwidth when the attacker is idle — forbidding bursting (rate==ceil)
+        // tanks TCP throughput and spikes latency.
+        let line_rate = self.line_rate_str();
 
         // ── Upload: HTB class + fw filter on physical NIC egress ─────────────
         //
@@ -536,7 +560,7 @@ impl TcManager {
                 "rate",
                 &rate_str,
                 "ceil",
-                &rate_str,
+                line_rate.as_str(),
                 "burst",
                 &burst,
             ])
@@ -609,7 +633,7 @@ impl TcManager {
                 "rate",
                 &rate_str,
                 "ceil",
-                &rate_str,
+                line_rate.as_str(),
                 "burst",
                 &burst,
             ])
@@ -682,6 +706,7 @@ impl TcManager {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let rate_str = format!("{}kbit", kbps);
         let burst = burst_for(kbps);
+        let line_rate = self.line_rate_str();
 
         for (dev, tree) in [
             (self.interface.as_str(), HANDLE_EGRESS),
@@ -705,7 +730,7 @@ impl TcManager {
                 "rate",
                 &rate_str,
                 "ceil",
-                &rate_str,
+                line_rate.as_str(),
                 "burst",
                 &burst,
             ])
@@ -812,6 +837,30 @@ fn ruleset_for(rules: &str) -> String {
         chain = NFT_CHAIN,
         rules = rules,
     )
+}
+
+/// Reads the interface's reported link speed in Mbit/s from
+/// `/sys/class/net/<iface>/speed`. Returns `None` (caller falls back to 1000)
+/// when the file is unreadable (e.g. virtual/IFB devices) or reports the
+/// kernel's "unknown speed" sentinel.
+fn read_link_speed_mbit(interface: &str) -> u64 {
+    let path = format!("/sys/class/net/{interface}/speed");
+    match std::fs::read_to_string(&path) {
+        Ok(s) => s
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|&v| v >= 1 && v <= 1_000_000)
+            .unwrap_or(1000),
+        Err(_) => 1000,
+    }
+}
+
+impl TcManager {
+    /// Formats the discovered link rate as an `tc` rate string (e.g. "1000mbit").
+    fn line_rate_str(&self) -> String {
+        format!("{}mbit", self.line_rate_mbit)
+    }
 }
 
 pub(crate) fn burst_for(kbps: u64) -> String {

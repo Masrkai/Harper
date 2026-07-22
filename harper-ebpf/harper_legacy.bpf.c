@@ -78,7 +78,7 @@ int harper_relay(struct __sk_buff *skb)
 
     __u8 *next = bpf_map_lookup_elem(&harper_map, &key);
     if (!next)
-        return TC_ACT_SHOT;
+        return TC_ACT_OK; // FIX: Let local traffic pass to the kernel
 
     __builtin_memcpy(eth->h_dest, next, ETH_ALEN);
     __builtin_memcpy(eth->h_source, own, ETH_ALEN);

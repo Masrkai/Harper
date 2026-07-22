@@ -7,19 +7,51 @@ pub struct KernelState {
     pub send_redirects: Option<String>,
     pub rp_filter_all: Option<String>,
     pub interface: String,
+    /// Additional sysctls tuned for high-performance MITM (save → set → restore).
+    extra: Vec<SysctlEntry>,
+}
+
+/// A single sysctl whose original value is saved so it can be restored on exit.
+struct SysctlEntry {
+    path: String,
+    original: Option<String>,
 }
 
 impl KernelState {
     pub fn enable(interface: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let redirect_path = format!("/proc/sys/net/ipv4/conf/{}/send_redirects", interface);
+        let accept_redirects_iface =
+            format!("/proc/sys/net/ipv4/conf/{interface}/accept_redirects");
+
+        // ── Additional MITM tuning (best-effort; save original → set → restore)
+        let mut extra: Vec<SysctlEntry> = Vec::new();
+        let mut tune = |path: &str, val: &str| {
+            extra.push(SysctlEntry {
+                path: path.to_string(),
+                original: read_proc(path),
+            });
+            let _ = std::fs::write(path, format!("{val}\n"));
+        };
+        tune("/proc/sys/net/ipv4/conf/all/accept_redirects", "0");
+        tune("/proc/sys/net/ipv4/conf/default/accept_redirects", "0");
+        tune(&accept_redirects_iface, "0");
+        tune("/proc/sys/net/ipv4/tcp_mtu_probing", "1");
+        tune("/proc/sys/net/core/rmem_max", "16777216");
+        tune("/proc/sys/net/core/wmem_max", "16777216");
+        tune("/proc/sys/net/core/rmem_default", "16777216");
+        tune("/proc/sys/net/core/wmem_default", "16777216");
+        tune("/proc/sys/net/ipv4/ip_local_port_range", "10000 65535");
+        tune("/proc/sys/net/netfilter/nf_conntrack_tcp_loose", "1");
 
         let state = Self {
             ip_forward: read_proc("/proc/sys/net/ipv4/ip_forward"),
             send_redirects: read_proc(&redirect_path),
             rp_filter_all: read_proc("/proc/sys/net/ipv4/conf/all/rp_filter"),
             interface: interface.to_owned(),
+            extra,
         };
 
+        // ── Standard MITM tuning
         std::fs::write("/proc/sys/net/ipv4/ip_forward", "0\n")?;
 
         let _ = std::fs::write(&redirect_path, "0\n");
@@ -47,6 +79,9 @@ impl KernelState {
             &format!("/proc/sys/net/ipv4/conf/{}/rp_filter", self.interface),
             self.rp_filter_all.as_deref(),
         );
+        for entry in &self.extra {
+            restore_sysctl(&entry.path, entry.original.as_deref());
+        }
     }
 }
 

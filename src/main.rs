@@ -755,9 +755,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Spoofer ──────────────────────────────────────────────────────────────
     let spoofer = SpooferEngine::new(
         our_mac,
+        our_ip,
         gateway_ip,
         &interface_name,
         Arc::clone(&host_table),
+        cli.one_sided,
     );
 
     let spoof_tx = spoofer.command_sender();

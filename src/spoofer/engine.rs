@@ -7,9 +7,13 @@ use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+use std::net::Ipv4Addr;
+
 pub struct SpooferEngine {
     our_mac: MacAddr,
+    our_ip: Ipv4Addr,
     gateway_ip: std::net::Ipv4Addr,
+    one_sided: bool,
     /// Name of the network interface. Each PoisonLoop opens its own
     /// independent socket on this interface — no shared sender mutex.
     interface_name: String,
@@ -29,15 +33,19 @@ struct PoisonHandle {
 impl SpooferEngine {
     pub fn new(
         our_mac: MacAddr,
+        our_ip: Ipv4Addr,
         gateway_ip: std::net::Ipv4Addr,
         interface_name: impl Into<String>,
         host_table: Arc<RwLock<HostTable>>,
+        one_sided: bool,
     ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
 
         Self {
             our_mac,
+            our_ip,
             gateway_ip,
+            one_sided,
             interface_name: interface_name.into(),
             host_table,
             active_loops: HashMap::new(),
@@ -101,7 +109,9 @@ impl SpooferEngine {
         let poison_loop = PoisonLoop::new(
             self.interface_name.clone(),
             self.our_mac,
+            self.our_ip,
             0, // interval_ms ignored; constants inside PoisonLoop are used
+            self.one_sided,
         );
 
         let task = tokio::spawn(async move { poison_loop.run(target, stop_rx).await });
