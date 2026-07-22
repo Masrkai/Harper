@@ -63,10 +63,16 @@ struct Cli {
     #[arg(short, long = "target", value_name = "IP|CIDR|RANGE")]
     targets: Vec<String>,
 
-    /// Bandwidth cap in kbps.
-    /// MITM mode: 0 = block entirely, omit = unlimited.
-    /// Gateway mode: applied to each selected client, omit = unlimited.
-    #[arg(short, long, value_name = "KBPS")]
+    /// Upload bandwidth cap in kbps per host.
+    #[arg(long, short = 'u', value_name = "KBPS")]
+    upload: Option<u64>,
+
+    /// Download bandwidth cap in kbps per host.
+    #[arg(long, short = 'd', value_name = "KBPS")]
+    download: Option<u64>,
+
+    /// Bandwidth cap in kbps (applies to both upload and download).
+    #[arg(short, long, value_name = "KBPS", conflicts_with_all = &["upload", "download"])]
     bandwidth: Option<u64>,
 
     /// Gateway mode: shape clients on a hotspot or LAN you host.
@@ -90,11 +96,16 @@ struct Cli {
     all: bool,
 
     /// Gateway/MITM mode: shared bandwidth pool in kbps.
-    /// All shaped clients share ONE HTB class of this size; unshaped traffic
-    /// (the attacker) keeps the rest of the line rate. Mutually exclusive with
-    /// --bandwidth (--pool wins if both are given).
-    #[arg(long, value_name = "KBPS")]
+    #[arg(long, value_name = "KBPS", conflicts_with_all = &["pool_upload", "pool_download"])]
     pool: Option<u64>,
+
+    /// Gateway/MITM mode: shared upload bandwidth pool in kbps.
+    #[arg(long, value_name = "KBPS")]
+    pool_upload: Option<u64>,
+
+    /// Gateway/MITM mode: shared download bandwidth pool in kbps.
+    #[arg(long, value_name = "KBPS")]
+    pool_download: Option<u64>,
 
     /// Gateway/MITM mode: explicitly name the bottleneck uplink device to
     /// EXCLUDE from victims, instead of the auto-detected gateway.
@@ -213,12 +224,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let cfg = gateway_mode::GatewayModeConfig {
             interface: cli.interface.clone(),
+            upload_kbps: cli.upload,
+            download_kbps: cli.download,
             bandwidth_kbps: cli.bandwidth,
             // --target is valid in gateway mode: skips the scan and shapes
             // only the specified IPs directly.
             targets: cli.targets.clone(),
             all: cli.all,
             pool_kbps: cli.pool,
+            pool_upload_kbps: cli.pool_upload,
+            pool_download_kbps: cli.pool_download,
             uplink: cli.uplink.clone(),
         };
         return gateway_mode::run(cfg).await.map_err(Into::into);
@@ -376,20 +391,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Target selection ─────────────────────────────────────────────────────
 
-    /// Prompts for bandwidth if not provided, returns the user's choice.
-    fn resolve_bandwidth(from_cli: Option<u64>, logger: &mut Logger) -> Option<u64> {
-        match from_cli {
-            Some(k) => {
-                logger.info_fmt(format_args!("Bandwidth (from args): {} kbps", k));
-                Some(k)
+    fn resolve_bandwidth(
+        from_upload: Option<u64>,
+        from_download: Option<u64>,
+        from_bandwidth: Option<u64>,
+        logger: &mut Logger,
+    ) -> (Option<u64>, Option<u64>) {
+        match (from_upload, from_download, from_bandwidth) {
+            (Some(u), Some(d), _) => {
+                logger.info_fmt(format_args!("Upload limit: {} kbps, Download limit: {} kbps", u, d));
+                (Some(u), Some(d))
             }
-            None => {
+            (Some(u), None, _) => {
+                logger.info_fmt(format_args!("Upload limit: {} kbps, Download unlimited", u));
+                (Some(u), None)
+            }
+            (None, Some(d), _) => {
+                logger.info_fmt(format_args!("Upload unlimited, Download limit: {} kbps", d));
+                (None, Some(d))
+            }
+            (None, None, Some(b)) => {
+                logger.info_fmt(format_args!("Bandwidth (from args): {} kbps per host", b));
+                (Some(b), Some(b))
+            }
+            (None, None, None) => {
                 use std::io::Write;
                 print!(
                     "{}",
                     crate::paint!(
                         &palette::KEYWORD,
-                        "Bandwidth cap in kbps per host (leave blank = unlimited): "
+                        "Bandwidth cap in kbps per host [upload/download or single value] (leave blank = unlimited): "
                     )
                 );
                 std::io::stdout().flush().unwrap();
@@ -397,17 +428,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut buf = String::new();
                 match std::io::stdin().read_line(&mut buf) {
                     Ok(_) => {
-                        let result = TargetSelector::parse_bandwidth(buf.trim());
-                        match result {
-                            Some(kbps) => logger
-                                .info_fmt(format_args!("Bandwidth limit: {} kbps per host", kbps)),
-                            None => logger.info_fmt(format_args!("No bandwidth limit.")),
+                        let (up, down) = TargetSelector::parse_bandwidth(buf.trim());
+                        match (up, down) {
+                            (Some(u), Some(d)) if u == d => logger
+                                .info_fmt(format_args!("Bandwidth limit: {} kbps per host", u)),
+                            (Some(u), Some(d)) => logger
+                                .info_fmt(format_args!("Bandwidth limit: upload {} kbps, download {} kbps", u, d)),
+                            (Some(u), None) => logger
+                                .info_fmt(format_args!("Bandwidth limit: upload {} kbps, download unlimited", u)),
+                            (None, Some(d)) => logger
+                                .info_fmt(format_args!("Bandwidth limit: upload unlimited, download {} kbps", d)),
+                            (None, None) => logger.info_fmt(format_args!("No bandwidth limit.")),
                         }
-                        result
+                        (up, down)
                     }
                     Err(_) => {
                         logger.error_fmt(format_args!("Failed to read input"));
-                        None
+                        (None, None)
                     }
                 }
             }
@@ -473,6 +510,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ));
     }
 
+    let has_pool = cli.pool.is_some() || cli.pool_upload.is_some() || cli.pool_download.is_some();
     let selection = if bypass_mode {
         let ids: Vec<_> = host_table
             .read()
@@ -487,16 +525,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         logger.info_fmt(format_args!("Bypass: {} target(s).", ids.len()));
 
-        // `--pool` overrides per-host bandwidth; skip the interactive prompt.
-        let bandwidth_kbps = if cli.pool.is_some() {
-            None
+        let (up, down) = if has_pool {
+            (None, None)
         } else {
-            resolve_bandwidth(cli.bandwidth, &mut logger)
+            resolve_bandwidth(cli.upload, cli.download, cli.bandwidth, &mut logger)
         };
 
         cli::target_selector::SelectionResult {
             host_ids: ids,
-            bandwidth_kbps,
+            upload_kbps: up,
+            download_kbps: down,
         }
     } else if cli.all {
         // `--all` in MITM mode: auto-select every discovered host except the
@@ -517,24 +555,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ids.len()
         ));
 
-        // `--pool` overrides per-host bandwidth; skip the interactive prompt.
-        let bandwidth_kbps = if cli.pool.is_some() {
-            None
+        let (up, down) = if has_pool {
+            (None, None)
         } else {
-            resolve_bandwidth(cli.bandwidth, &mut logger)
+            resolve_bandwidth(cli.upload, cli.download, cli.bandwidth, &mut logger)
         };
 
         cli::target_selector::SelectionResult {
             host_ids: ids,
-            bandwidth_kbps,
+            upload_kbps: up,
+            download_kbps: down,
         }
     } else {
         // Interactive path with TargetSelector
         match {
             let t = host_table.read().await;
-            TargetSelector::select_with(&t, excluded_ip, cli.pool.is_some()) // ← Prompts user; excludes uplink/gateway; skips bandwidth prompt if --pool given
+            TargetSelector::select_with(&t, excluded_ip, has_pool) // ← Prompts user; excludes uplink/gateway; skips bandwidth prompt if pool given
         } {
-            Some(s) => s,
+            Some(mut s) => {
+                if let Some(b) = cli.bandwidth {
+                    s.upload_kbps = Some(b);
+                    s.download_kbps = Some(b);
+                    logger.info_fmt(format_args!("Bandwidth (from args): {} kbps", b));
+                }
+                if let Some(u) = cli.upload {
+                    s.upload_kbps = Some(u);
+                    logger.info_fmt(format_args!("Upload bandwidth (from args): {} kbps", u));
+                }
+                if let Some(d) = cli.download {
+                    s.download_kbps = Some(d);
+                    logger.info_fmt(format_args!("Download bandwidth (from args): {} kbps", d));
+                }
+                s
+            }
             None => {
                 logger.info_fmt(format_args!("No targets selected. Exiting."));
                 return Ok(());
@@ -577,18 +630,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Unshaped traffic (the attacker) keeps the rest of the line rate via the
     // passthrough default class. Mutually exclusive with per-host --bandwidth;
     // pool wins when both are given (mirrors gateway-mode behaviour).
-    if let Some(pool_kbps) = cli.pool {
-        if pool_kbps == 0 {
+    let pool_upload = cli.pool_upload.or(cli.pool);
+    let pool_download = cli.pool_download.or(cli.pool);
+
+    if pool_upload.is_some() || pool_download.is_some() {
+        if pool_upload.map_or(false, |k| k == 0) || pool_download.map_or(false, |k| k == 0) {
             logger.error_fmt(format_args!(
                 "--pool must be a positive kbps value (got 0)."
             ));
             shutdown_manager.shutdown().await;
             std::process::exit(1);
-        }
-        if selection.bandwidth_kbps.is_some() {
-            logger.error_fmt(format_args!(
-                "--pool and --bandwidth are mutually exclusive; using --pool (shared)."
-            ));
         }
         match tc.as_mut().unwrap().init().await {
             Err(e) => {
@@ -616,19 +667,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match tc
                     .as_mut()
                     .unwrap()
-                    .limit_pool(pool_kbps, &victim_ips)
+                    .limit_pool_split(pool_upload, pool_download, &victim_ips)
                     .await
                 {
                     Ok(()) => logger.info_fmt(format_args!(
-                        "tc: {} client(s) share a {} kbps pool; attacker keeps the rest.",
+                        "tc: {} client(s) share a pool (upload: {:?}, download: {:?}); attacker keeps the rest.",
                         victim_ips.len(),
-                        palette::WARN.paint(&pool_kbps.to_string()),
+                        pool_upload,
+                        pool_download
                     )),
-                    Err(e) => logger.error_fmt(format_args!("tc limit_pool failed: {e}")),
+                    Err(e) => logger.error_fmt(format_args!("tc limit_pool_split failed: {e}")),
                 }
             }
         }
-    } else if let Some(kbps) = selection.bandwidth_kbps {
+    } else if selection.upload_kbps.is_some() || selection.download_kbps.is_some() {
         match tc.as_mut().unwrap().init().await {
             Err(e) => {
                 logger.error_fmt(format_args!("tc init failed: {e}"));
@@ -647,14 +699,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         match tc
                             .as_mut()
                             .unwrap()
-                            .limit_host(id, entry.host.ip, kbps)
+                            .limit_host(id, entry.host.ip, selection.upload_kbps, selection.download_kbps)
                             .await
                         {
                             Ok(()) => logger.info_fmt(format_args!(
-                                "tc: [{}] {} → {} kbps",
+                                "tc: [{}] {} → upload: {:?}, download: {:?}",
                                 id,
                                 palette::WARN.paint(&entry.host.ip.to_string()),
-                                kbps,
+                                selection.upload_kbps,
+                                selection.download_kbps,
                             )),
                             Err(e) => logger.error_fmt(format_args!(
                                 "tc limit_host [{}] {}: {e}",
@@ -805,8 +858,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             spoof_tx_clone,
             relay_clone,
             tc.take().unwrap(),
-            cli.pool,
-            selection.bandwidth_kbps,
+            pool_upload,
+            pool_download,
+            selection.upload_kbps,
+            selection.download_kbps,
         );
         manager.seed(&selection.host_ids).await;
 

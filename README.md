@@ -74,7 +74,12 @@ sudo ./scripts/netns-test.sh run gateway_pool
 | `-i, --interface <IFACE>`        | Network interface to use (auto-selected if omitted)                  |
 | `-g, --gateway <IP>`             | Gateway IP (MITM mode only, auto-detected if omitted)                |
 | `-t, --target <IP\|CIDR\|RANGE>` | Target IP(s) — skips full scan (can repeat)                          |
-| `-b, --bandwidth <KBPS>`         | Bandwidth cap per host (omit = unlimited)                            |
+| `-u, --upload <KBPS>`              | Upload bandwidth cap per host (omit = unlimited)                     |
+| `-d, --download <KBPS>`            | Download bandwidth cap per host (omit = unlimited)                   |
+| `-b, --bandwidth <KBPS>`           | Bandwidth cap (both upload/download, overridden by -u/-d)            |
+| `--pool <KBPS>`                    | Shared upload/download bandwidth pool per host                       |
+| `--pool-upload <KBPS>`             | Shared upload bandwidth pool                                         |
+| `--pool-download <KBPS>`           | Shared download bandwidth pool                                       |
 | `--one-sided`                    | Use gratuitous ARP takeover instead of bidirectional poisoning       |
 | `--uplink <IP\|MAC>`             | Explicitly name the bottleneck uplink device to exclude from shaping |
 

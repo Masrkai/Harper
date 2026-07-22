@@ -22,7 +22,8 @@ use std::net::Ipv4Addr;
 
 pub struct SelectionResult {
     pub host_ids: Vec<HostId>,
-    pub bandwidth_kbps: Option<u64>,
+    pub upload_kbps: Option<u64>,
+    pub download_kbps: Option<u64>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -141,15 +142,16 @@ impl TargetSelector {
             }
         }
 
-        let bandwidth_kbps = if skip_bandwidth {
-            None
+        let (upload_kbps, download_kbps) = if skip_bandwidth {
+            (None, None)
         } else {
             Self::prompt_bandwidth()
         };
 
         Some(SelectionResult {
             host_ids,
-            bandwidth_kbps,
+            upload_kbps,
+            download_kbps,
         })
     }
 
@@ -225,35 +227,56 @@ impl TargetSelector {
         Some(ids)
     }
 
-    pub(crate) fn parse_bandwidth(raw: &str) -> Option<u64> {
+    pub(crate) fn parse_bandwidth(raw: &str) -> (Option<u64>, Option<u64>) {
         if raw.is_empty() || raw == "0" {
-            return None;
+            return (None, None);
         }
-        match raw.parse::<u64>() {
-            Ok(kbps) if kbps > 0 => Some(kbps),
-            _ => None,
+        if let Some((up_str, down_str)) = raw.split_once('/') {
+            let up = up_str.trim().parse::<u64>().ok().filter(|&v| v > 0);
+            let down = down_str.trim().parse::<u64>().ok().filter(|&v| v > 0);
+            (up, down)
+        } else {
+            match raw.parse::<u64>() {
+                Ok(kbps) if kbps > 0 => (Some(kbps), Some(kbps)),
+                _ => (None, None),
+            }
         }
     }
 
-    fn prompt_bandwidth() -> Option<u64> {
+    fn prompt_bandwidth() -> (Option<u64>, Option<u64>) {
         print!(
             "\n{}",
             paint!(
                 &palette::PROMPT,
-                "Bandwidth cap in kbps per host (leave blank = unlimited): "
+                "Bandwidth cap in kbps per host [upload/download or single value] (leave blank = unlimited): "
             )
         );
         io::stdout().flush().unwrap();
-        let raw = read_line()?;
-        let result = Self::parse_bandwidth(&raw);
-        match result {
-            Some(kbps) => println!(
+        let raw = match read_line() {
+            Some(r) => r,
+            None => return (None, None),
+        };
+        let (up, down) = Self::parse_bandwidth(&raw);
+        match (up, down) {
+            (Some(u), Some(d)) if u == d => println!(
                 "{}",
-                paint!(&palette::OK, "  Bandwidth limit: {} kbps per host", kbps)
+                paint!(&palette::OK, "  Bandwidth limit: {} kbps per host (upload/download)", u)
             ),
-            None => println!("{}", paint!(&palette::DIM, "  No bandwidth limit.")),
+            (Some(u), Some(d)) => println!(
+                "{}",
+                paint!(&palette::OK, "  Bandwidth limit: upload {} kbps, download {} kbps", u, d)
+            ),
+            (Some(u), None) => println!(
+                "{}",
+                paint!(&palette::OK, "  Bandwidth limit: upload {} kbps, download unlimited", u)
+            ),
+            (None, Some(d)) => println!(
+                "{}",
+                paint!(&palette::OK, "  Bandwidth limit: upload unlimited, download {} kbps", d)
+            ),
+            (None, None) => println!("{}", paint!(&palette::DIM, "  No bandwidth limit.")),
         }
-        result
+        (up, down)
     }
 }
 
@@ -419,26 +442,28 @@ mod tests {
     #[test]
     fn test_parse_bandwidth() {
         // Valid → Some
-        let valid: &[(&str, u64)] = &[
-            ("1", 1),
-            ("512", 512),
-            ("1000", 1_000),
-            ("1000000", 1_000_000),
+        let valid: &[(&str, Option<u64>, Option<u64>)] = &[
+            ("1", Some(1), Some(1)),
+            ("512", Some(512), Some(512)),
+            ("1000/500", Some(1000), Some(500)),
+            (" / 2000", None, Some(2000)),
+            ("3000/ ", Some(3000), None),
         ];
-        for &(input, expected) in valid {
+        for &(input, exp_up, exp_down) in valid {
             assert_eq!(
                 TargetSelector::parse_bandwidth(input),
-                Some(expected),
+                (exp_up, exp_down),
                 "input '{input}'"
             );
         }
 
-        // Invalid → None
-        let invalid = ["", "0", "abc", "1.5", "-100"];
+        // Invalid → (None, None)
+        let invalid = ["", "0", "abc", "1.5", "-100", "a/b"];
         for input in invalid {
-            assert!(
-                TargetSelector::parse_bandwidth(input).is_none(),
-                "'{input}' should return None"
+            assert_eq!(
+                TargetSelector::parse_bandwidth(input),
+                (None, None),
+                "'{input}' should return (None, None)"
             );
         }
     }

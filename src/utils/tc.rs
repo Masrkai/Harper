@@ -119,7 +119,10 @@ impl std::error::Error for TcError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShapeMode {
-    Limited(u64),
+    Limited {
+        upload: Option<u64>,
+        download: Option<u64>,
+    },
     Blocked,
 }
 
@@ -263,24 +266,32 @@ impl TcManager {
         &mut self,
         host_id: HostId,
         ip: Ipv4Addr,
-        kbps: u64,
+        upload_kbps: Option<u64>,
+        download_kbps: Option<u64>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.ensure_init().await?;
 
-        let new_mode = if kbps == 0 {
+        if upload_kbps.is_none() && download_kbps.is_none() {
+            return self.remove_host_inner(host_id).await;
+        }
+
+        let new_mode = if upload_kbps == Some(0) && download_kbps == Some(0) {
             ShapeMode::Blocked
         } else {
-            ShapeMode::Limited(kbps)
+            ShapeMode::Limited {
+                upload: upload_kbps,
+                download: download_kbps,
+            }
         };
 
         if let Some(existing) = self.hosts.get(&host_id).cloned() {
             match (existing.mode, new_mode) {
-                (ShapeMode::Limited(_), ShapeMode::Limited(new_kbps)) => {
-                    self.update_rate_classes(existing.slot, new_kbps).await?;
-                    self.hosts.get_mut(&host_id).unwrap().mode = ShapeMode::Limited(new_kbps);
+                (ShapeMode::Limited { .. }, ShapeMode::Limited { upload, download }) => {
+                    self.update_rate_classes(existing.slot, upload, download).await?;
+                    self.hosts.get_mut(&host_id).unwrap().mode = ShapeMode::Limited { upload, download };
                     println!(
-                        "[*] tc: host {} ({}) updated → {} kbps",
-                        host_id, ip, new_kbps
+                        "[*] tc: host {} ({}) updated → upload: {:?}, download: {:?}",
+                        host_id, ip, upload, download
                     );
                     return Ok(());
                 }
@@ -300,10 +311,15 @@ impl TcManager {
         self.remove_host_inner(host_id).await
     }
 
-    pub async fn limit_range(&mut self, entries: &[(HostId, Ipv4Addr)], kbps: u64) -> Vec<TcError> {
+    pub async fn limit_range(
+        &mut self,
+        entries: &[(HostId, Ipv4Addr)],
+        upload_kbps: Option<u64>,
+        download_kbps: Option<u64>,
+    ) -> Vec<TcError> {
         let mut errors = Vec::new();
         for &(id, ip) in entries {
-            if let Err(e) = self.limit_host(id, ip, kbps).await {
+            if let Err(e) = self.limit_host(id, ip, upload_kbps, download_kbps).await {
                 errors.push(TcError {
                     host_id: id,
                     message: e.to_string(),
@@ -313,54 +329,49 @@ impl TcManager {
         errors
     }
 
-    /// Pool mode: every victim shares ONE HTB class of `pool_kbps` on both the
-    /// upload (egress) and download (ifb0) trees. All victim IPs are marked
-    /// with the single shared `MARK_POOL` fwmark so their traffic funnels into
-    /// that class; unmarked traffic (the attacker) keeps the rest of
-    /// `the link rate` via the passthrough default class.
-    ///
-    /// The HTB class + fw filters are **static** (same rate, same mark), so the
-    /// class is created exactly once. Re-applying the pool — which happens on
-    /// every victim add/evict in `--all` mode — only refreshes the nftables
-    /// ruleset that decides *which* IPs carry the mark. This avoids the prior
-    /// bug where the class was deleted+recreated each call and the kernel
-    /// rejected the recreate with `RTNETLINK answers: File exists`.
-    ///
-    /// `line_rate_mbit` is discovered at `init()` time from
-    /// `/sys/class/net/<iface>/speed` (falling back to 1000 Mbit/s) so the HTB
-    /// root and victim `ceil` values track the real physical link instead of a
-    /// hardcoded assumption.
-    pub async fn limit_pool(
+    /// Pool mode: every victim shares ONE HTB class of pool rates on both upload
+    /// and download trees.
+    pub async fn limit_pool_split(
         &mut self,
-        pool_kbps: u64,
+        pool_upload: Option<u64>,
+        pool_download: Option<u64>,
         victim_ips: &[Ipv4Addr],
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.ensure_init().await?;
 
         let slot = MARK_POOL as u16;
 
-        // Create the shared class once. `File exists` is treated as success so a
-        // stale class from a previous run (or a prior call) does not trip us up.
         if !self.pool_class_created {
-            match self.add_htb_leaf(slot, pool_kbps).await {
+            match self.add_htb_leaf(slot, pool_upload, pool_download).await {
                 Ok(()) => self.pool_class_created = true,
                 Err(e) if e.to_string().contains("File exists") => {
                     self.pool_class_created = true;
                 }
                 Err(e) => return Err(e),
             }
+        } else {
+            self.update_rate_classes(slot, pool_upload, pool_download).await?;
         }
 
-        let rules = build_nft_pool_rules(victim_ips);
+        let rules = build_nft_pool_rules(victim_ips, pool_upload.is_some(), pool_download.is_some());
         let _ = nft_run(&["flush", "chain", "ip", NFT_TABLE, NFT_CHAIN]).await;
         nft_apply(&ruleset_for(&rules)).await?;
 
         println!(
-            "[+] tc: {} victim(s) share a {} kbit pool (attacker keeps the rest).",
+            "[+] tc: {} victim(s) share a pool (upload: {:?}, download: {:?}).",
             victim_ips.len(),
-            pool_kbps
+            pool_upload,
+            pool_download
         );
         Ok(())
+    }
+
+    pub async fn limit_pool(
+        &mut self,
+        pool_kbps: u64,
+        victim_ips: &[Ipv4Addr],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.limit_pool_split(Some(pool_kbps), Some(pool_kbps), victim_ips).await
     }
 
     pub fn is_shaping(&self, host_id: HostId) -> bool {
@@ -369,7 +380,7 @@ impl TcManager {
 
     pub fn current_kbps(&self, host_id: HostId) -> Option<u64> {
         self.hosts.get(&host_id).map(|s| match s.mode {
-            ShapeMode::Limited(k) => k,
+            ShapeMode::Limited { upload, download } => upload.or(download).unwrap_or(0),
             ShapeMode::Blocked => 0,
         })
     }
@@ -480,16 +491,19 @@ impl TcManager {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let slot = self.apply_host_slot(host_id, ip, mode);
 
-        let kbps = match mode {
-            ShapeMode::Limited(k) => k,
-            ShapeMode::Blocked => 0,
+        let (up, down) = match mode {
+            ShapeMode::Limited { upload, download } => (upload, download),
+            ShapeMode::Blocked => (Some(0), Some(0)),
         };
-        self.add_htb_leaf(slot, kbps).await?;
+        self.add_htb_leaf(slot, up, down).await?;
         self.nft_rebuild_chain().await?;
 
         match mode {
-            ShapeMode::Limited(k) => {
-                println!("[+] tc: host {} ({}) limited to {} kbps", host_id, ip, k)
+            ShapeMode::Limited { upload, download } => {
+                println!(
+                    "[+] tc: host {} ({}) limited → upload: {:?}, download: {:?}",
+                    host_id, ip, upload, download
+                )
             }
             ShapeMode::Blocked => println!("[+] tc: host {} ({}) BLOCKED", host_id, ip),
         }
@@ -518,28 +532,23 @@ impl TcManager {
         Ok(())
     }
 
-    async fn add_htb_leaf(&self, slot: u16, kbps: u64) -> Result<(), Box<dyn std::error::Error>> {
-        let rate_str = if kbps == 0 {
-            "1bit".to_string()
-        } else {
-            format!("{}kbit", kbps)
-        };
-        let burst = burst_for(kbps);
+    async fn add_htb_leaf(
+        &self,
+        slot: u16,
+        upload_kbps: Option<u64>,
+        download_kbps: Option<u64>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let slot_hex = format!("{:x}", slot);
         let slot_str = format!("{}", slot);
-        // Victim leaves keep their guaranteed `rate` (the kbps cap) but are
-        // allowed to `ceil` up to the full link rate so they can borrow spare
-        // bandwidth when the attacker is idle — forbidding bursting (rate==ceil)
-        // tanks TCP throughput and spikes latency.
         let line_rate = self.line_rate_str();
 
-        // ── Upload: HTB class + fw filter on physical NIC egress ─────────────
-        //
-        // The nftables FORWARD chain sets:
-        //   ip saddr <victim>  meta mark set <slot>  ct mark set meta mark
-        // so upload packets carry the mark by the time they reach this egress
-        // qdisc.  The fw filter matches and routes into the limited HTB class.
-        {
+        if let Some(up) = upload_kbps {
+            let rate_str = if up == 0 {
+                "1bit".to_string()
+            } else {
+                format!("{}kbit", up)
+            };
+            let burst = burst_for(up);
             let dev = self.interface.as_str();
             let major = HANDLE_EGRESS.trim_end_matches(':');
             let root_class = format!("{}:1", major);
@@ -599,20 +608,13 @@ impl TcManager {
             .await?;
         }
 
-        // ── NO per-victim ingress filter here ─────────────────────────────────
-        //
-        // The catch-all redirect (u32 match 0 0) installed once in init()
-        // sends ALL ingress traffic to ifb0.  We do not add anything to the
-        // physical NIC's ingress qdisc per-victim.
-
-        // ── Download: HTB class + fw filter on IFB egress ────────────────────
-        //
-        // By the time a packet lands on ifb0's egress qdisc it has been
-        // through PREROUTING (conntrack lookup) and the nftables FORWARD chain:
-        //   ip daddr <victim>  ct mark != 0  meta mark set ct mark
-        // The mark is now set, and the fw filter below classifies it into the
-        // correct rate-limited HTB class.
-        {
+        if let Some(down) = download_kbps {
+            let rate_str = if down == 0 {
+                "1bit".to_string()
+            } else {
+                format!("{}kbit", down)
+            };
+            let burst = burst_for(down);
             let dev = IFB_DEV;
             let major = HANDLE_INGRESS.trim_end_matches(':');
             let root_class = format!("{}:1", major);
@@ -702,41 +704,11 @@ impl TcManager {
     async fn update_rate_classes(
         &self,
         slot: u16,
-        kbps: u64,
+        upload_kbps: Option<u64>,
+        download_kbps: Option<u64>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let rate_str = format!("{}kbit", kbps);
-        let burst = burst_for(kbps);
-        let line_rate = self.line_rate_str();
-
-        for (dev, tree) in [
-            (self.interface.as_str(), HANDLE_EGRESS),
-            (IFB_DEV, HANDLE_INGRESS),
-        ] {
-            let major = tree.trim_end_matches(':');
-            let root_class = format!("{}:1", major);
-            let classid = format!("{}:{:x}", major, slot);
-
-            run_check(&[
-                "tc",
-                "class",
-                "change",
-                "dev",
-                dev,
-                "parent",
-                &root_class,
-                "classid",
-                &classid,
-                "htb",
-                "rate",
-                &rate_str,
-                "ceil",
-                line_rate.as_str(),
-                "burst",
-                &burst,
-            ])
-            .await?;
-        }
-        Ok(())
+        self.remove_htb_leaf(slot).await;
+        self.add_htb_leaf(slot, upload_kbps, download_kbps).await
     }
 
     async fn teardown_tc(&self) {
@@ -783,15 +755,18 @@ pub(crate) fn build_nft_rules(hosts: &HashMap<HostId, HostSlot>) -> String {
         let mark = slot_info.slot as u32;
 
         match slot_info.mode {
-            ShapeMode::Limited(_) => {
-                // Upload:   mark packet + save to conntrack entry.
-                // Download: restore mark from conntrack, or set it on the
-                // first download packet (ct mark 0) so it reaches the class.
-                rules.push_str(&format!(
-                    "\t\tip saddr {ip} meta mark set {mark} ct mark set meta mark\n\
-                     \t\tip daddr {ip} ct mark != 0 meta mark set ct mark\n\
-                     \t\tip daddr {ip} ct mark == 0 meta mark set {mark} ct mark set meta mark\n"
-                ));
+            ShapeMode::Limited { upload, download } => {
+                if upload.is_some() {
+                    rules.push_str(&format!(
+                        "\t\tip saddr {ip} meta mark set {mark} ct mark set meta mark\n"
+                    ));
+                }
+                if download.is_some() {
+                    rules.push_str(&format!(
+                        "\t\tip daddr {ip} ct mark != 0 meta mark set ct mark\n\
+                         \t\tip daddr {ip} ct mark == 0 meta mark set {mark} ct mark set meta mark\n"
+                    ));
+                }
             }
             ShapeMode::Blocked => {
                 rules.push_str(&format!(
@@ -808,17 +783,23 @@ pub(crate) fn build_nft_rules(hosts: &HashMap<HostId, HostSlot>) -> String {
 /// Builds the nftables FORWARD-chain rule body for pool mode: every victim IP
 /// is marked with the single shared `MARK_POOL` so all its traffic funnels
 /// into one shared HTB class. Pure and testable.
-pub(crate) fn build_nft_pool_rules(victim_ips: &[Ipv4Addr]) -> String {
+pub(crate) fn build_nft_pool_rules(victim_ips: &[Ipv4Addr], has_upload: bool, has_download: bool) -> String {
     let mut rules = String::new();
     let mark = MARK_POOL;
 
     for ip in victim_ips {
         let ip = ip.to_string();
-        rules.push_str(&format!(
-            "\t\tip saddr {ip} meta mark set {mark} ct mark set meta mark\n\
-             \t\tip daddr {ip} ct mark != 0 meta mark set ct mark\n\
-             \t\tip daddr {ip} ct mark == 0 meta mark set {mark} ct mark set meta mark\n"
-        ));
+        if has_upload {
+            rules.push_str(&format!(
+                "\t\tip saddr {ip} meta mark set {mark} ct mark set meta mark\n"
+            ));
+        }
+        if has_download {
+            rules.push_str(&format!(
+                "\t\tip daddr {ip} ct mark != 0 meta mark set ct mark\n\
+                 \t\tip daddr {ip} ct mark == 0 meta mark set {mark} ct mark set meta mark\n"
+            ));
+        }
     }
 
     rules
@@ -1013,7 +994,7 @@ mod tests {
             &mut m,
             1,
             Ipv4Addr::new(10, 0, 0, 1),
-            ShapeMode::Limited(2_048),
+            ShapeMode::Limited { upload: Some(2_048), download: Some(2_048) },
         );
         assert_eq!(m.current_kbps(1), Some(2_048));
     }
@@ -1043,14 +1024,23 @@ mod tests {
     async fn test_batch_empty_no_errors() {
         let mut m = make();
         m.initialized = true;
-        assert!(m.limit_range(&[], 1_000).await.is_empty());
+        assert!(m.limit_range(&[], Some(1_000), Some(1_000)).await.is_empty());
     }
 
     #[test]
     fn test_shape_mode_eq() {
-        assert_eq!(ShapeMode::Limited(100), ShapeMode::Limited(100));
-        assert_ne!(ShapeMode::Limited(100), ShapeMode::Limited(200));
-        assert_ne!(ShapeMode::Limited(100), ShapeMode::Blocked);
+        assert_eq!(
+            ShapeMode::Limited { upload: Some(100), download: Some(100) },
+            ShapeMode::Limited { upload: Some(100), download: Some(100) }
+        );
+        assert_ne!(
+            ShapeMode::Limited { upload: Some(100), download: Some(100) },
+            ShapeMode::Limited { upload: Some(200), download: Some(200) }
+        );
+        assert_ne!(
+            ShapeMode::Limited { upload: Some(100), download: Some(100) },
+            ShapeMode::Blocked
+        );
     }
 
     #[test]
@@ -1061,7 +1051,7 @@ mod tests {
             HostSlot {
                 slot: 7,
                 ip: Ipv4Addr::new(10, 0, 0, 5),
-                mode: ShapeMode::Limited(2_048),
+                mode: ShapeMode::Limited { upload: Some(2_048), download: Some(2_048) },
             },
         );
         let rules = build_nft_rules(&hosts);
@@ -1090,7 +1080,7 @@ mod tests {
     #[test]
     fn test_build_nft_pool_rules_single_shared_mark() {
         let victims = vec![Ipv4Addr::new(10, 0, 0, 5), Ipv4Addr::new(10, 0, 0, 6)];
-        let rules = build_nft_pool_rules(&victims);
+        let rules = build_nft_pool_rules(&victims, true, true);
         // Both victims marked with the SAME shared mark (MARK_POOL = 0xFFE = 4094).
         assert!(rules.contains("ip saddr 10.0.0.5 meta mark set 4094"));
         assert!(rules.contains("ip saddr 10.0.0.6 meta mark set 4094"));
@@ -1105,7 +1095,7 @@ mod tests {
     async fn test_live_full_cycle() {
         let mut m = TcManager::new("lo");
         m.init().await.unwrap();
-        m.limit_host(1, Ipv4Addr::new(127, 0, 0, 1), 1_000)
+        m.limit_host(1, Ipv4Addr::new(127, 0, 0, 1), Some(1_000), Some(1_000))
             .await
             .unwrap();
         assert_eq!(m.current_kbps(1), Some(1_000));

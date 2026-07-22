@@ -28,10 +28,14 @@ use crate::utils::tc::TcManager;
 
 pub struct GatewayModeConfig {
     pub interface: Option<String>,
+    pub upload_kbps: Option<u64>,
+    pub download_kbps: Option<u64>,
     pub bandwidth_kbps: Option<u64>,
     pub targets: Vec<String>,
     pub all: bool,
     pub pool_kbps: Option<u64>,
+    pub pool_upload_kbps: Option<u64>,
+    pub pool_download_kbps: Option<u64>,
     pub uplink: Option<String>,
 }
 
@@ -190,17 +194,18 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
         }
         logger.info_fmt(format_args!("Bypass: {} target(s) selected.", ids.len()));
 
-        let kbps = match cfg.bandwidth_kbps {
-            Some(k) => {
-                logger.info_fmt(format_args!("Bandwidth (from args): {} kbps", k));
-                Some(k)
-            }
-            None => prompt_bandwidth_once(),
+        let (upload_limit, download_limit) = match (cfg.upload_kbps, cfg.download_kbps, cfg.bandwidth_kbps) {
+            (Some(u), Some(d), _) => (Some(u), Some(d)),
+            (Some(u), None, _) => (Some(u), None),
+            (None, Some(d), _) => (None, Some(d)),
+            (None, None, Some(b)) => (Some(b), Some(b)),
+            (None, None, None) => prompt_bandwidth_once(),
         };
 
         SelectionResult {
             host_ids: ids,
-            bandwidth_kbps: kbps,
+            upload_kbps: upload_limit,
+            download_kbps: download_limit,
         }
     } else if cfg.all {
         let ids: Vec<_> = host_table
@@ -219,25 +224,35 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
             ids.len()
         ));
 
-        let kbps = match cfg.bandwidth_kbps {
-            Some(k) => {
-                logger.info_fmt(format_args!("Bandwidth (from args): {} kbps", k));
-                Some(k)
-            }
-            None => prompt_bandwidth_once(),
+        let (upload_limit, download_limit) = match (cfg.upload_kbps, cfg.download_kbps, cfg.bandwidth_kbps) {
+            (Some(u), Some(d), _) => (Some(u), Some(d)),
+            (Some(u), None, _) => (Some(u), None),
+            (None, Some(d), _) => (None, Some(d)),
+            (None, None, Some(b)) => (Some(b), Some(b)),
+            (None, None, None) => prompt_bandwidth_once(),
         };
 
         SelectionResult {
             host_ids: ids,
-            bandwidth_kbps: kbps,
+            upload_kbps: upload_limit,
+            download_kbps: download_limit,
         }
     } else {
         let t = host_table.read().await;
         match TargetSelector::select(&t, excluded_ip) {
             Some(mut s) => {
                 if let Some(k) = cfg.bandwidth_kbps {
-                    s.bandwidth_kbps = Some(k);
+                    s.upload_kbps = Some(k);
+                    s.download_kbps = Some(k);
                     logger.info_fmt(format_args!("Bandwidth (from args): {} kbps", k));
+                }
+                if let Some(u) = cfg.upload_kbps {
+                    s.upload_kbps = Some(u);
+                    logger.info_fmt(format_args!("Upload bandwidth (from args): {} kbps", u));
+                }
+                if let Some(d) = cfg.download_kbps {
+                    s.download_kbps = Some(d);
+                    logger.info_fmt(format_args!("Download bandwidth (from args): {} kbps", d));
                 }
                 s
             }
@@ -248,18 +263,10 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
         }
     };
 
-    // ── Resolve final bandwidth ──────────────────────────────────────────────
-    let kbps = match selection.bandwidth_kbps {
-        Some(0) => {
-            logger.error_fmt(format_args!(
-                "Bandwidth 0 is not valid in gateway mode. \
-                 Use a positive kbps value or omit --bandwidth for no cap."
-            ));
-            return Ok(());
-        }
-        Some(k) => k,
-        None => 0,
-    };
+    let pool_upload = cfg.pool_upload_kbps.or(cfg.pool_kbps);
+    let pool_download = cfg.pool_download_kbps.or(cfg.pool_kbps);
+    let upload_limit = cfg.upload_kbps.or(cfg.bandwidth_kbps).or(selection.upload_kbps);
+    let download_limit = cfg.download_kbps.or(cfg.bandwidth_kbps).or(selection.download_kbps);
 
     // ── tc initialisation ────────────────────────────────────────────────────
     let mut tc = TcManager::new(&interface_name);
@@ -278,18 +285,7 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
     // Pool mode: all selected victims share ONE HTB class of `pool_kbps`.
     // Unshaped traffic (the attacker) keeps the rest of the line rate via the
     // passthrough default class. Mutually exclusive with per-host --bandwidth.
-    if let Some(pool_kbps) = cfg.pool_kbps {
-        if pool_kbps == 0 {
-            logger.error_fmt(format_args!(
-                "--pool must be a positive kbps value (got 0)."
-            ));
-            return Ok(());
-        }
-        if kbps > 0 && cfg.bandwidth_kbps.is_some() {
-            logger.error_fmt(format_args!(
-                "--pool and --bandwidth are mutually exclusive; using --pool (shared)."
-            ));
-        }
+    if pool_upload.is_some() || pool_download.is_some() {
         let table = host_table.read().await;
         let victim_ips: Vec<Ipv4Addr> = selection
             .host_ids
@@ -300,24 +296,26 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
             logger.error_fmt(format_args!("No victims to pool."));
             return Ok(());
         }
-        match tc.limit_pool(pool_kbps, &victim_ips).await {
+        match tc.limit_pool_split(pool_upload, pool_download, &victim_ips).await {
             Ok(()) => logger.info_fmt(format_args!(
-                "tc: {} client(s) share a {} kbps pool; attacker keeps the rest.",
+                "tc: {} client(s) share a pool (upload: {:?}, download: {:?}).",
                 victim_ips.len(),
-                palette::WARN.paint(&pool_kbps.to_string()),
+                pool_upload,
+                pool_download
             )),
-            Err(e) => logger.error_fmt(format_args!("tc limit_pool failed: {e}")),
+            Err(e) => logger.error_fmt(format_args!("tc limit_pool_split failed: {e}")),
         }
-    } else if kbps > 0 {
+    } else if upload_limit.is_some() || download_limit.is_some() {
         let table = host_table.read().await;
         for &id in &selection.host_ids {
             if let Some(entry) = table.get_by_id(id) {
-                match tc.limit_host(id, entry.host.ip, kbps).await {
+                match tc.limit_host(id, entry.host.ip, upload_limit, download_limit).await {
                     Ok(()) => logger.info_fmt(format_args!(
-                        "tc: [{}] {} → {} kbps",
+                        "tc: [{}] {} → upload: {:?}, download: {:?}",
                         id,
                         palette::WARN.paint(&entry.host.ip.to_string()),
-                        kbps,
+                        upload_limit,
+                        download_limit,
                     )),
                     Err(e) => logger.error_fmt(format_args!(
                         "tc limit_host [{}] {}: {e}",
@@ -334,11 +332,11 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
     }
 
     // ── Status + shutdown ────────────────────────────────────────────────────
-    let status_msg = if kbps > 0 {
+    let has_limit = upload_limit.is_some() || download_limit.is_some() || pool_upload.is_some() || pool_download.is_some();
+    let status_msg = if has_limit {
         format!(
-            "Shaping {} client(s) at {} kbps each. Press Ctrl-C or 'q' + Enter to stop.",
+            "Shaping {} client(s). Press Ctrl-C or 'q' + Enter to stop.",
             selection.host_ids.len(),
-            kbps,
         )
     } else {
         format!(
@@ -364,15 +362,15 @@ pub async fn run(cfg: GatewayModeConfig) -> Result<(), Box<dyn std::error::Error
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn prompt_bandwidth_once() -> Option<u64> {
+fn prompt_bandwidth_once() -> (Option<u64>, Option<u64>) {
     use std::io::Write as _;
-    print!("Bandwidth cap in kbps per client (leave blank = unlimited): ");
+    print!("Bandwidth cap in kbps per client [upload/download or single value] (leave blank = unlimited): ");
     std::io::stdout().flush().unwrap();
     let mut buf = String::new();
     if std::io::stdin().read_line(&mut buf).is_ok() {
         return TargetSelector::parse_bandwidth(buf.trim());
     }
-    None
+    (None, None)
 }
 
 /// Resolves `--uplink <ip|mac>` to the IP of the device to exclude from
@@ -436,10 +434,14 @@ mod tests {
     fn test_config_fields() {
         let cfg = GatewayModeConfig {
             interface: Some("eth0".to_string()),
+            upload_kbps: None,
+            download_kbps: None,
             bandwidth_kbps: Some(1024),
             targets: vec!["10.0.0.1".to_string()],
             all: false,
             pool_kbps: None,
+            pool_upload_kbps: None,
+            pool_download_kbps: None,
             uplink: None,
         };
         assert_eq!(cfg.interface.as_deref(), Some("eth0"));
@@ -449,10 +451,14 @@ mod tests {
         // Empty targets → full scan path
         let empty = GatewayModeConfig {
             interface: None,
+            upload_kbps: None,
+            download_kbps: None,
             bandwidth_kbps: None,
             targets: vec![],
             all: false,
             pool_kbps: None,
+            pool_upload_kbps: None,
+            pool_download_kbps: None,
             uplink: None,
         };
         assert!(empty.targets.is_empty());

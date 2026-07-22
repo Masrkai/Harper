@@ -236,12 +236,12 @@ fn bdd_gateway_scan_fallback_when_the_cache_is_empty() {
 /// A fake TcManager surface that records calls instead of shelling out to
 /// `tc`/`nft`. Lets behavioural scenarios assert on shaping intent with no root.
 struct FakeTc {
-    pool_calls: Vec<(u64, Vec<std::net::Ipv4Addr>)>,
+    pool_calls: Vec<(Option<u64>, Option<u64>, Vec<std::net::Ipv4Addr>)>,
     /// Counts how many times the shared pool *class* was (re)created. The real
     /// `limit_pool` must create it exactly ONCE and only refresh rules after,
     /// so a 2nd `limit_pool` call should NOT bump this counter.
     class_creates: usize,
-    host_calls: Vec<(crate::host::table::HostId, std::net::Ipv4Addr, u64)>,
+    host_calls: Vec<(crate::host::table::HostId, std::net::Ipv4Addr, Option<u64>, Option<u64>)>,
 }
 
 impl FakeTc {
@@ -253,18 +253,22 @@ impl FakeTc {
         }
     }
 
-    /// Mirrors the production `limit_pool`: create the static class once, then
-    /// record every ruleset refresh (one `pool_calls` entry per call).
-    fn limit_pool(&mut self, pool_kbps: u64, victim_ips: &[std::net::Ipv4Addr]) {
+    fn limit_pool_split(&mut self, pool_upload: Option<u64>, pool_download: Option<u64>, victim_ips: &[std::net::Ipv4Addr]) {
         if self.class_creates == 0 {
             self.class_creates += 1;
         }
-        self.pool_calls.push((pool_kbps, victim_ips.to_vec()));
+        self.pool_calls.push((pool_upload, pool_download, victim_ips.to_vec()));
+    }
+
+    /// Mirrors the production `limit_pool`: create the static class once, then
+    /// record every ruleset refresh (one `pool_calls` entry per call).
+    fn limit_pool(&mut self, pool_kbps: u64, victim_ips: &[std::net::Ipv4Addr]) {
+        self.limit_pool_split(Some(pool_kbps), Some(pool_kbps), victim_ips);
     }
 
     #[allow(dead_code)]
-    fn limit_host(&mut self, id: crate::host::table::HostId, ip: std::net::Ipv4Addr, kbps: u64) {
-        self.host_calls.push((id, ip, kbps));
+    fn limit_host(&mut self, id: crate::host::table::HostId, ip: std::net::Ipv4Addr, upload: Option<u64>, download: Option<u64>) {
+        self.host_calls.push((id, ip, upload, download));
     }
 }
 
@@ -286,8 +290,9 @@ fn bdd_shaping_pool_mode_shares_one_class_across_all_victims() {
     tc.limit_pool(pool_kbps, &victims);
 
     assert_eq!(tc.pool_calls.len(), 1);
-    let (actual_kbps, actual_victims) = &tc.pool_calls[0];
-    assert_eq!(*actual_kbps, pool_kbps);
+    let (actual_upload, actual_download, actual_victims) = &tc.pool_calls[0];
+    assert_eq!(*actual_upload, Some(pool_kbps));
+    assert_eq!(*actual_download, Some(pool_kbps));
     assert_eq!(actual_victims.len(), victims.len());
     assert!(step_texts(sc)[3].starts_with("the attacker keeps the rest"));
 }
@@ -374,8 +379,9 @@ fn bdd_shaping_mitm_pool_applies_across_selected_victims_excluding_gateway() {
     }
 
     assert_eq!(tc.pool_calls.len(), 1);
-    let (actual_kbps, actual_victims) = &tc.pool_calls[0];
-    assert_eq!(*actual_kbps, pool_kbps);
+    let (up, down, actual_victims) = &tc.pool_calls[0];
+    assert_eq!(*up, Some(pool_kbps));
+    assert_eq!(*down, Some(pool_kbps));
     assert_eq!(actual_victims.len(), 2);
     assert!(actual_victims.contains(&Ipv4Addr::new(192, 168, 1, 5)));
     assert!(actual_victims.contains(&Ipv4Addr::new(192, 168, 1, 6)));
@@ -435,8 +441,9 @@ fn bdd_shaping_mitm_all_dynamically_adds_late_victim_to_pool() {
         2,
         "pool re-applied once for the new victim"
     );
-    let (kbps, victims) = &tc.pool_calls[1];
-    assert_eq!(*kbps, pool_kbps);
+    let (up, down, victims) = &tc.pool_calls[1];
+    assert_eq!(*up, Some(pool_kbps));
+    assert_eq!(*down, Some(pool_kbps));
     assert_eq!(victims.len(), 3, "late victim must be added to the pool");
     assert!(victims.contains(&Ipv4Addr::new(192, 168, 1, 5)));
     assert!(victims.contains(&Ipv4Addr::new(192, 168, 1, 6)));
@@ -1065,7 +1072,7 @@ fn bdd_tc_shaping_limiting_records_kbps() {
     tc.apply_host_slot(
         1 as HostId,
         "10.0.0.5".parse().unwrap(),
-        ShapeMode::Limited(2048),
+        ShapeMode::Limited { upload: Some(2048), download: Some(2048) },
     );
 
     assert!(tc.is_shaping(1));
@@ -1096,12 +1103,12 @@ fn bdd_tc_shaping_updating_mutates_rate() {
     let slot1 = tc.apply_host_slot(
         1 as HostId,
         "10.0.0.5".parse().unwrap(),
-        ShapeMode::Limited(2048),
+        ShapeMode::Limited { upload: Some(2048), download: Some(2048) },
     );
     let slot2 = tc.apply_host_slot(
         1 as HostId,
         "10.0.0.5".parse().unwrap(),
-        ShapeMode::Limited(512),
+        ShapeMode::Limited { upload: Some(512), download: Some(512) },
     );
 
     assert!(tc.is_shaping(1));
@@ -1121,17 +1128,17 @@ fn bdd_tc_shaping_slot_allocation_distinct_and_skips_passthrough() {
     let s1 = tc.apply_host_slot(
         1 as HostId,
         "10.0.0.5".parse().unwrap(),
-        ShapeMode::Limited(1000),
+        ShapeMode::Limited { upload: Some(1000), download: Some(1000) },
     );
     let s2 = tc.apply_host_slot(
         2 as HostId,
         "10.0.0.6".parse().unwrap(),
-        ShapeMode::Limited(1000),
+        ShapeMode::Limited { upload: Some(1000), download: Some(1000) },
     );
     let s3 = tc.apply_host_slot(
         3 as HostId,
         "10.0.0.7".parse().unwrap(),
-        ShapeMode::Limited(1000),
+        ShapeMode::Limited { upload: Some(1000), download: Some(1000) },
     );
 
     let mut slots = [s1, s2, s3];
@@ -1159,7 +1166,7 @@ fn bdd_tc_shaping_remove_clears_state() {
     tc.apply_host_slot(
         1 as HostId,
         "10.0.0.5".parse().unwrap(),
-        ShapeMode::Limited(1000),
+        ShapeMode::Limited { upload: Some(1000), download: Some(1000) },
     );
     assert!(tc.is_shaping(1));
 
@@ -1226,6 +1233,8 @@ fn make_mitm_harness(pairs: &[(&str, &str)], gateway_ip: Ipv4Addr) -> MitmHarnes
         spoof_tx,
         std::sync::Arc::new(crate::forwarder::RelayHandle::Userspace(fwd_tx)),
         TcManager::new("eth0"),
+        None,
+        None,
         None,
         None,
     );

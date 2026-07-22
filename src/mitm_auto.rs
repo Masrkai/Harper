@@ -52,10 +52,10 @@ pub struct MitmAutoManager {
     spoof_tx: mpsc::Sender<SpooferCommand>,
     relay: Arc<RelayHandle>,
     tc: TcManager,
-    /// When set, all victims share ONE pool class of this size.
-    pool_kbps: Option<u64>,
-    /// Per-host cap used when `pool_kbps` is None.
-    per_host_kbps: Option<u64>,
+    pool_upload_kbps: Option<u64>,
+    pool_download_kbps: Option<u64>,
+    upload_kbps: Option<u64>,
+    download_kbps: Option<u64>,
     /// Hosts the manager is actively MITM-ing (for eviction bookkeeping).
     managed: HashMap<HostId, Instant>,
 }
@@ -73,8 +73,10 @@ impl MitmAutoManager {
         spoof_tx: mpsc::Sender<SpooferCommand>,
         relay: Arc<RelayHandle>,
         tc: TcManager,
-        pool_kbps: Option<u64>,
-        per_host_kbps: Option<u64>,
+        pool_upload_kbps: Option<u64>,
+        pool_download_kbps: Option<u64>,
+        upload_kbps: Option<u64>,
+        download_kbps: Option<u64>,
     ) -> Self {
         Self {
             interface_name,
@@ -87,8 +89,10 @@ impl MitmAutoManager {
             spoof_tx,
             relay,
             tc,
-            pool_kbps,
-            per_host_kbps,
+            pool_upload_kbps,
+            pool_download_kbps,
+            upload_kbps,
+            download_kbps,
             managed: HashMap::new(),
         }
     }
@@ -196,11 +200,11 @@ impl MitmAutoManager {
 
         self.relay.enable(id, ip, mac, self.gateway_mac).await;
 
-        if self.pool_kbps.is_some() {
+        if self.pool_upload_kbps.is_some() || self.pool_download_kbps.is_some() {
             // Pool mode: re-apply the shared class across ALL managed victims.
             self.apply_pool().await;
-        } else if let Some(kbps) = self.per_host_kbps {
-            if let Err(e) = self.tc.limit_host(id, ip, kbps).await {
+        } else if self.upload_kbps.is_some() || self.download_kbps.is_some() {
+            if let Err(e) = self.tc.limit_host(id, ip, self.upload_kbps, self.download_kbps).await {
                 eprintln!("[!] Auto-MITM: limit_host [{}] {}: {e}", id, ip);
             }
         }
@@ -208,10 +212,9 @@ impl MitmAutoManager {
 
     /// Re-applies the shared pool class to the full set of managed victim IPs.
     async fn apply_pool(&mut self) {
-        let pool_kbps = match self.pool_kbps {
-            Some(k) => k,
-            None => return,
-        };
+        if self.pool_upload_kbps.is_none() && self.pool_download_kbps.is_none() {
+            return;
+        }
         let table = self.host_table.read().await;
         let victim_ips: Vec<Ipv4Addr> = self
             .managed
@@ -220,8 +223,8 @@ impl MitmAutoManager {
             .collect();
         drop(table);
 
-        if let Err(e) = self.tc.limit_pool(pool_kbps, &victim_ips).await {
-            eprintln!("[!] Auto-MITM: limit_pool failed: {e}");
+        if let Err(e) = self.tc.limit_pool_split(self.pool_upload_kbps, self.pool_download_kbps, &victim_ips).await {
+            eprintln!("[!] Auto-MITM: limit_pool_split failed: {e}");
         }
     }
 
@@ -247,7 +250,7 @@ impl MitmAutoManager {
         let _ = self.spoof_tx.send(SpooferCommand::Stop(id)).await;
         self.relay.disable(id).await;
 
-        if self.pool_kbps.is_some() {
+        if self.pool_upload_kbps.is_some() || self.pool_download_kbps.is_some() {
             self.apply_pool().await; // re-apply pool without the evicted IP
         } else {
             self.tc.remove_host(id).await.ok();
@@ -339,8 +342,10 @@ mod tests {
             _s_tx,
             relay,
             TcManager::new("eth0"),
-            None, // pool off
-            None, // per-host off
+            None, // pool upload off
+            None, // pool download off
+            None, // upload off
+            None, // download off
         );
         (mgr, table)
     }
