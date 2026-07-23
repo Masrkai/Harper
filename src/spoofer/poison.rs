@@ -23,6 +23,8 @@
 //
 // The main.rs `spoof_sender` Arc is no longer passed to SpooferEngine at all.
 
+use crate::cli::color::palette::{INFO, OK, WARN, KEYWORD};
+use crate::paint;
 use crate::network::packet::{ArpPoison, ArpRestore, GratuitousArp};
 use pnet::datalink::{self, Channel, DataLinkSender, NetworkInterface};
 use pnet::util::MacAddr;
@@ -148,9 +150,8 @@ impl PoisonLoop {
 
                         if victim_count % 5 == 0 {
                             println!(
-                                "[*] poison victim #{} host {} (every ~{}s)",
-                                victim_count, target.victim_ip,
-                                VICTIM_INTERVAL_MS / 1_000
+                                "{}",
+                                paint!(INFO, "[*] poison victim #{} host {} (every ~{}s)", victim_count, target.victim_ip, VICTIM_INTERVAL_MS / 1_000)
                             );
                         }
                     }
@@ -162,9 +163,8 @@ impl PoisonLoop {
 
                         if gateway_count % 3 == 0 {
                             println!(
-                                "[*] poison gateway #{} for host {} (every ~{}s)",
-                                gateway_count, target.victim_ip,
-                                GATEWAY_INTERVAL_MS / 1_000
+                                "{}",
+                                paint!(INFO, "[*] poison gateway #{} for host {} (every ~{}s)", gateway_count, target.victim_ip, GATEWAY_INTERVAL_MS / 1_000)
                             );
                         }
                     }
@@ -180,16 +180,15 @@ impl PoisonLoop {
 
                         if garp_count % 3 == 0 {
                             println!(
-                                "[*] garp self #{} for {} (every ~{}s)",
-                                garp_count, self.our_ip,
-                                GARP_INTERVAL_MS / 1_000
+                                "{}",
+                                paint!(INFO, "[*] garp self #{} for {} (every ~{}s)", garp_count, self.our_ip, GARP_INTERVAL_MS / 1_000)
                             );
                         }
                     }
                 }
 
                 _ = &mut stop_rx => {
-                    println!("[*] stopping poison for host {}", target.host_id);
+                    println!("{}", paint!(INFO, "[*] stopping poison for host {}", target.host_id));
                     restore(&mut *sender, &target);
                     return Ok(());
                 }
@@ -220,13 +219,13 @@ fn open_sender(
 /// Lock-free — the sender is exclusively owned by this loop.
 fn send_once(sender: &mut dyn DataLinkSender, bytes: &[u8], label: &str) {
     if let Some(Err(e)) = sender.send_to(bytes, None) {
-        eprintln!("[!] {label}: {e}");
+        eprintln!("{}", paint!(WARN, "[!] {label}: {e}"));
     }
 }
 
 /// Sends 5 ARP restore packets to unwind the poison on both sides.
 fn restore(sender: &mut dyn DataLinkSender, target: &super::SpoofTarget) {
-    println!("[*] restoring ARP caches for {}", target.victim_ip);
+    println!("{}", paint!(INFO, "[*] restoring ARP caches for {}", target.victim_ip));
 
     let victim_restore = ArpRestore::new(
         target.victim_mac,
@@ -247,7 +246,7 @@ fn restore(sender: &mut dyn DataLinkSender, target: &super::SpoofTarget) {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    println!("[+] ARP caches restored for {}", target.victim_ip);
+    println!("{}", paint!(OK, "[+] ARP caches restored for {}", target.victim_ip));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

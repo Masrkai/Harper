@@ -1,4 +1,6 @@
 // src/forwarder/engine.rs
+use crate::cli::color::palette::{INFO, OK, WARN, KEYWORD};
+use crate::paint;
 use crate::host::table::{HostId, HostTable};
 use pnet::datalink::{DataLinkReceiver, DataLinkSender};
 use pnet::packet::Packet;
@@ -88,7 +90,7 @@ impl PacketForwarder {
     }
 
     pub async fn run(mut self) {
-        println!("[*] PacketForwarder started");
+        println!("{}", paint!(INFO, "[*] PacketForwarder started"));
 
         let cmd_rx_arc = Arc::clone(&self.cmd_rx);
         let mut cmd_rx = cmd_rx_arc.lock().await;
@@ -144,7 +146,7 @@ impl PacketForwarder {
                         }
                     }
                     Err(e) => {
-                        eprintln!("[!] Packet receive error: {}", e);
+                        eprintln!("{}", paint!(WARN, "[!] Packet receive error: {}", e));
                         break;
                     }
                 }
@@ -169,7 +171,7 @@ impl PacketForwarder {
 
         let _ = Self::write_ip_forward(self.original_ip_forward);
         let _ = packet_task.await;
-        println!("[*] PacketForwarder shut down");
+        println!("{}", paint!(INFO, "[*] PacketForwarder shut down"));
     }
 
     pub(crate) fn relay_packet(
@@ -368,23 +370,23 @@ impl PacketForwarder {
 
     async fn enable_forwarding(&mut self, rule: ForwardRule) {
         let host_id = rule.host_id;
-        println!("[*] Enabling packet forwarding for host {}:", host_id);
-        println!("    {} <-> {}", rule.victim_ip, rule.gateway_ip);
+        println!("{}", paint!(INFO, "[*] Enabling packet forwarding for host {}:", host_id));
+        println!("    {} <-> {}", paint!(KEYWORD, "{}", rule.victim_ip), paint!(KEYWORD, "{}", rule.gateway_ip));
         self.active_rules.lock().await.insert(host_id, rule);
-        println!("[+] Forwarding enabled for host {}", host_id);
+        println!("{}", paint!(OK, "[+] Forwarding enabled for host {}", host_id));
     }
 
     async fn disable_forwarding(&mut self, host_id: crate::host::table::HostId) {
         if self.active_rules.lock().await.remove(&host_id).is_some() {
-            println!("[+] Forwarding disabled for host {}", host_id);
+            println!("{}", paint!(OK, "[+] Forwarding disabled for host {}", host_id));
         } else {
-            println!("[!] Host {} not being forwarded", host_id);
+            println!("{}", paint!(WARN, "[!] Host {} not being forwarded", host_id));
         }
     }
 
     async fn disable_all(&mut self) {
         self.active_rules.lock().await.clear();
-        println!("[+] All forwarding disabled");
+        println!("{}", paint!(OK, "[+] All forwarding disabled"));
     }
 }
 
