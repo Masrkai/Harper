@@ -10,7 +10,7 @@ Feature: Gateway shaping modes
       | 10.0.0.6    |
     When pool mode is applied with 500 kbps
     Then one shared class of 500 kbps is created for all victims
-    And the attacker keeps the rest of the line rate
+    And the local host keeps the rest of the line rate
 
   Scenario: Pool mode creates the shared class once and only refreshes rules on re-apply
     Given the selected victim IPs

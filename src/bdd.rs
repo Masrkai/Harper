@@ -294,7 +294,7 @@ fn bdd_shaping_pool_mode_shares_one_class_across_all_victims() {
     assert_eq!(*actual_upload, Some(pool_kbps));
     assert_eq!(*actual_download, Some(pool_kbps));
     assert_eq!(actual_victims.len(), victims.len());
-    assert!(step_texts(sc)[3].starts_with("the attacker keeps the rest"));
+    assert!(step_texts(sc)[3].starts_with("the local host keeps the rest"));
 }
 
 #[test]

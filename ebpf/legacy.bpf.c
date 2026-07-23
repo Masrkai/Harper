@@ -2,7 +2,7 @@
  * in-kernel MITM relay for Harper.
  *
  * Attached as a tc ingress filter on the MITM interface. For every frame whose
- * Ethernet destination equals the attacker MAC, we look up the correct next-hop
+ * Ethernet destination equals the local MAC, we look up the correct next-hop
  * MAC in the `harper_map` BPF hash map (keyed by source MAC) and rewrite the
  * Ethernet header in place, then let the kernel re-transmit it. This replaces
  * the userspace PacketForwarder copy + fragment + retry path.

@@ -627,7 +627,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tc = Some(TcManager::new(&interface_name));
 
     // Pool mode: all selected victims share ONE HTB class of `pool_kbps`.
-    // Unshaped traffic (the attacker) keeps the rest of the line rate via the
+    // Unshaped traffic (local host) keeps the rest of the line rate via the
     // passthrough default class. Mutually exclusive with per-host --bandwidth;
     // pool wins when both are given (mirrors gateway-mode behaviour).
     let pool_upload = cli.pool_upload.or(cli.pool);
@@ -671,7 +671,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .await
                 {
                     Ok(()) => logger.info_fmt(format_args!(
-                        "tc: {} client(s) share a pool (upload: {:?}, download: {:?}); attacker keeps the rest.",
+                        "tc: {} client(s) share a pool (upload: {:?}, download: {:?}); local host keeps the rest.",
                         victim_ips.len(),
                         pool_upload,
                         pool_download

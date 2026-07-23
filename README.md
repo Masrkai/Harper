@@ -112,7 +112,7 @@ sudo harper --gateway-mode --all -b 1024
 sudo harper --gateway-mode -t 10.0.0.5 -t 10.0.0.10 -b 500
 
 # Pool mode: all shaped clients share ONE bandwidth pool
-# Unshaped traffic (the "attacker" / uplink) keeps the rest of the line
+# Unshaped traffic (the local host / uplink) keeps the rest of the line
 sudo harper --gateway-mode --all --pool 2048
 
 # Exclude a repeater/uplink by MAC or IP from the victim pool

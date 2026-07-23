@@ -25,7 +25,7 @@ Feature: Kernel eBPF relay backend
     Then the BPF map no longer contains either MAC
 
   Scenario: Map miss drops the frame instead of forwarding to kernel stack
-    Given a frame addressed to the attacker MAC
+    Given a frame addressed to the local MAC
     But the source MAC is not in the harper_map
     When the eBPF program runs
     Then the frame is dropped with TC_ACT_SHOT

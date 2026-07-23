@@ -2,7 +2,7 @@
  * in-kernel MITM relay for Harper — XDP variant.
  *
  * Attached as an XDP program on the MITM interface. For every frame whose
- * Ethernet destination equals the attacker MAC, we look up the correct next-hop
+ * Ethernet destination equals the local MAC, we look up the correct next-hop
  * MAC in the `harper_map` BPF LRU hash map (keyed by source MAC), rewrite the
  * Ethernet header in place, then redirect the frame to the egress of the same
  * interface via a DEV map, bypassing the kernel network stack entirely (no SKB

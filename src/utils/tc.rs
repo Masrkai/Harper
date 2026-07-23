@@ -100,7 +100,7 @@ const NFT_CHAIN: &str = "FORWARD";
 
 /// Single shared fwmark used by pool mode. Every victim IP is marked with this
 /// so all their traffic funnels into one shared HTB class; unmarked traffic
-/// (the attacker) keeps the rest of the link rate via the passthrough class.
+/// (local unshaped traffic) keeps the rest of the link rate via the passthrough class.
 const MARK_POOL: u32 = 0xFFE;
 
 #[derive(Debug)]
