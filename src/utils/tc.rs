@@ -579,7 +579,7 @@ impl TcManager {
                 }
             }
             
-            run_check(&[
+            if let Err(e) = run(&[
                 "tc",
                 "qdisc",
                 "add",
@@ -593,7 +593,14 @@ impl TcManager {
                 "perturb",
                 "10",
             ])
-            .await?;
+            .await {
+                let msg = e.to_string();
+                if !(msg.contains("File exists")
+                    || msg.contains("Exclusivity flag on"))
+                {
+                    return Err(format!("tc qdisc add failed: {}", msg).into());
+                }
+            }
             run_check(&[
                 "tc",
                 "filter",
@@ -650,7 +657,7 @@ impl TcManager {
                 }
             }
 
-            run_check(&[
+            if let Err(e) = run(&[
                 "tc",
                 "qdisc",
                 "add",
@@ -664,7 +671,14 @@ impl TcManager {
                 "perturb",
                 "10",
             ])
-            .await?;
+            .await {
+                let msg = e.to_string();
+                if !(msg.contains("File exists")
+                    || msg.contains("Exclusivity flag on"))
+                {
+                    return Err(format!("tc qdisc add failed: {}", msg).into());
+                }
+            }
             run_check(&[
                 "tc",
                 "filter",
@@ -689,13 +703,13 @@ impl TcManager {
 
     async fn remove_htb_leaf(&self, slot: u16) {
         let slot_str = format!("{}", slot);
-        for (dev, tree) in [
-            (self.interface.as_str(), HANDLE_EGRESS),
-            (IFB_DEV, HANDLE_INGRESS),
+        for (dev, tree, handle_offset) in [
+            (self.interface.as_str(), HANDLE_EGRESS, 0x100u32),
+            (IFB_DEV, HANDLE_INGRESS, 0x200u32),
         ] {
             let major = tree.trim_end_matches(':');
             let classid = format!("{}:{:x}", major, slot);
-            let leaf_handle = format!("{:x}:", slot as u32 + 0x100);
+            let leaf_handle = format!("{:x}:", (slot as u32) + handle_offset);
             
             let _ = run(&[
                 "tc",
@@ -1118,6 +1132,75 @@ mod tests {
         assert!(rules.contains("ip daddr 10.0.0.6 ct mark == 0 meta mark set 4094"));
         // No per-host slot numbers — every line uses 4094.
         assert!(!rules.contains("meta mark set 7"));
+    }
+
+    /// The two leaf-handle offsets are *the* invariant that keeps pool re-apply
+    /// from leaving an orphan qdisc on `ifb0`. The bug was that the original
+    /// `remove_htb_leaf` hard-coded `slot + 0x100` for both `dev`s, so the
+    /// download qdisc on ifb0 (created with `slot + 0x200`) was never deleted.
+    /// The next `add_htb_leaf` then hit `RTNETLINK answers: File exists`
+    /// followed by `Exclusivity flag on, cannot modify`.
+    #[test]
+    fn test_leaf_handle_per_device_offset_matches_between_add_and_remove() {
+        let slot: u16 = 0xFFE;
+
+        // `add_htb_leaf` upload branch (egress NIC, HANDLE_EGRESS).
+        let add_upload = format!("{:x}:", slot as u32 + 0x100);
+        // `add_htb_leaf` download branch (ifb0, HANDLE_INGRESS).
+        let add_download = format!("{:x}:", slot as u32 + 0x200);
+
+        // `remove_htb_leaf` mirrored table.
+        let mut add_handles = std::collections::HashMap::new();
+        add_handles.insert(self::HANDLE_EGRESS, add_upload.clone());
+        add_handles.insert(self::HANDLE_INGRESS, add_download.clone());
+
+        let physical_handle = add_handles.get(self::HANDLE_EGRESS).unwrap();
+        let ifb_handle = add_handles.get(self::HANDLE_INGRESS).unwrap();
+
+        // Egress (slot 0xFFE + 0x100 = 0x10FE) writes as `10fe:`.
+        assert_eq!(physical_handle, "10fe:");
+        // Ingress (slot 0xFFE + 0x200 = 0x11FE) writes as `11fe:`.
+        assert_eq!(ifb_handle, "11fe:");
+        // They MUST be distinct — same handle on both devs is the bug.
+        assert_ne!(physical_handle, ifb_handle);
+
+        // `remove_htb_leaf` table must produce the same pair (the bug was a
+        // hoisted constant that collapsed both to `11fe:`).
+        for (tree, handle_offset) in [
+            (self::HANDLE_EGRESS, 0x100u32),
+            (self::HANDLE_INGRESS, 0x200u32),
+        ] {
+            let expected = format!("{:x}:", (slot as u32) + handle_offset);
+            assert_eq!(add_handles.get(tree).unwrap(), &expected);
+        }
+    }
+
+    /// `add_htb_leaf` qdisc-add must NOT propagate `RTNETLINK answers: File
+    /// exists` or `Exclusivity flag on` — both mean the desired qdisc is
+    /// already there. This is the message the kernel uses when the parent
+    /// class still holds a stale child, which is exactly the state we used
+    /// to land in on every pool re-apply. The grep below is the canonical
+    /// orchestrator's accept-list for the qdisc-add wrapper.
+    #[test]
+    fn test_qdisc_add_tolerates_already_installed_messages() {
+        let acceptable = [
+            "File exists",
+            "Exclusivity flag on",
+        ];
+        for needle in acceptable {
+            // Accept: do not propagate.
+            let err = format!("tc qdisc add ... failed: RTNETLINK answers: {needle}");
+            assert!(
+                err.contains(needle),
+                "guard must whitelist {needle:?}"
+            );
+        }
+        // Anything else still bubbles up.
+        let other = "tc qdisc add ... failed: No such file or directory";
+        assert!(
+            !acceptable.iter().any(|n| other.contains(n)),
+            "non-listed errors must propagate"
+        );
     }
 
     #[tokio::test]

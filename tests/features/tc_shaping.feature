@@ -39,3 +39,20 @@ Feature: TcManager real shaping state
   Scenario: Querying an unknown host returns no kbps
     Given a fresh TcManager on interface eth0
     Then host 99 current kbps is none
+
+  Scenario: Pool re-apply uses distinct leaf-handle offsets per device
+    Given the pool slot is 0xFFE
+    When a leaf is added for the egress nic
+    And a leaf is added for ifb0
+    Then the egress leaf handle equals 11fe:
+    And the ifb0 leaf handle equals 12fe:
+    And the two handles are different
+    And the same offsets are used when removing the leaf
+    And no orphan qdisc is left on ifb0 between pool re-applies
+
+  Scenario: Pool re-apply tolerates the kernel's already-installed messages
+    Given a pool re-apply for slot 0xFFE
+    When the tc qdisc-add returns File exists
+    And the tc qdisc-add returns Exclusivity flag on
+    Then the qdisc-add wrapper does not propagate the error
+    And subsequent pool re-applies do not leak RTNETLINK failures into Auto-MITM

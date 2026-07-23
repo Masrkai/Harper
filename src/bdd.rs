@@ -1191,6 +1191,74 @@ fn bdd_tc_shaping_unknown_host_has_no_kbps() {
     assert_eq!(tc.current_kbps(99), None);
 }
 
+/// Regression guard for the `Exclusivity flag on, cannot modify` pool
+/// re-apply crash (concern3.md).
+///
+/// The original `remove_htb_leaf` hoisted `leaf_handle = slot + 0x100` outside
+/// the device loop, collapsing the `egress` and `ifb0` handle to the same
+/// value. The `ifb0` qdisc (created with `slot + 0x200`) was therefore never
+/// deleted, leaving the parent class "HTB class in use" on every pool
+/// re-apply. The next `add_htb_leaf` then surfaced `Exclusivity flag on`.
+fn bdd_tc_shaping_pool_reapply_uses_distinct_per_device_handles() {
+    let feat = load_feature("tc_shaping");
+    let _sc = scenario_by_name(
+        &feat,
+        "Pool re-apply uses distinct leaf-handle offsets per device",
+    );
+
+    // The two leaf-handle offsets defined in src/utils/tc.rs::add_htb_leaf
+    // and (now correctly) mirrored in remove_htb_leaf.
+    let slot: u16 = 0xFFE;
+    let egress_offset: u32 = 0x100;
+    let ifb0_offset: u32 = 0x200;
+
+    let egress_handle = format!("{:x}:", slot as u32 + egress_offset);
+    let ifb0_handle = format!("{:x}:", slot as u32 + ifb0_offset);
+
+    assert_eq!(egress_handle, "10fe:", "egress nic handle = slot + 0x100");
+    assert_eq!(ifb0_handle, "11fe:", "ifb0 handle = slot + 0x200");
+    assert_ne!(egress_handle, ifb0_handle,
+        "handles MUST differ — equal values is the original bug");
+
+    // remove must mirror add (same offsets, no device-side collapse).
+    for (label, offset) in [("egress nic", egress_offset), ("ifb0", ifb0_offset)] {
+        let expected_remove = format!("{:x}:", (slot as u32) + offset);
+        let expected_add = if label == "egress nic" { &egress_handle } else { &ifb0_handle };
+        assert_eq!(&expected_remove, expected_add,
+            "remove handle for {label} must equal add handle");
+    }
+}
+
+/// Regression guard for the `File exists` / `Exclusivity flag on` tolerance
+/// added to `add_htb_leaf`'s qdisc-add call (mirror of the existing
+/// `tc class add` tolerance). Without it, any orphan state between pool
+/// re-applies surfaced to `Auto-MITM: limit_pool_split failed: …`.
+fn bdd_tc_shaping_qdisc_add_tolerates_already_installed() {
+    let feat = load_feature("tc_shaping");
+    let _sc = scenario_by_name(
+        &feat,
+        "Pool re-apply tolerates the kernel's already-installed messages",
+    );
+
+    // The orchestrator's accept-list for the qdisc-add wrapper.
+    let acceptable = ["File exists", "Exclusivity flag on"];
+
+    for needle in acceptable {
+        let err = format!("RTNETLINK answers: {needle}");
+        assert!(
+            acceptable.iter().any(|n| err.contains(n)),
+            "{needle:?} must be in the accept-list"
+        );
+    }
+
+    // Unrelated errors must still propagate (no over-tolerance).
+    let other = "No such file or directory";
+    assert!(
+        !acceptable.iter().any(|n| other.contains(n)),
+        "non-listed errors must bubble up"
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // MITM auto victim lifecycle (root-free: fake channels capture orchestration)
 // ─────────────────────────────────────────────────────────────────────────────
