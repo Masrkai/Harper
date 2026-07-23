@@ -688,6 +688,7 @@ impl TcManager {
     }
 
     async fn remove_htb_leaf(&self, slot: u16) {
+        let slot_str = format!("{}", slot);
         for (dev, tree) in [
             (self.interface.as_str(), HANDLE_EGRESS),
             (IFB_DEV, HANDLE_INGRESS),
@@ -696,7 +697,21 @@ impl TcManager {
             let classid = format!("{}:{:x}", major, slot);
             let leaf_handle = format!("{:x}:", slot as u32 + 0x100);
             
-            // Try to remove, but don't care if it fails (e.g. doesn't exist)
+            let _ = run(&[
+                "tc",
+                "filter",
+                "del",
+                "dev",
+                dev,
+                "parent",
+                &format!("{}:0", major),
+                "handle",
+                &slot_str,
+                "prio",
+                "1",
+            ])
+            .await;
+
             let _ = run(&[
                 "tc",
                 "qdisc",
