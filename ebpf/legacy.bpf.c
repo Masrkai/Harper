@@ -1,13 +1,13 @@
 /*
- * harper-ebpf: in-kernel MITM relay for Harper — tc redirect variant.
+ * in-kernel MITM relay for Harper.
  *
  * Attached as a tc ingress filter on the MITM interface. For every frame whose
  * Ethernet destination equals the attacker MAC, we look up the correct next-hop
- * MAC in the `harper_map` BPF LRU hash map (keyed by source MAC), rewrite the
- * Ethernet header in place, then redirect the frame to the egress of the same
- * interface via a DEV map, bypassing the kernel network stack.
+ * MAC in the `harper_map` BPF hash map (keyed by source MAC) and rewrite the
+ * Ethernet header in place, then let the kernel re-transmit it. This replaces
+ * the userspace PacketForwarder copy + fragment + retry path.
  *
- * The maps are populated from userspace as victims are enabled/disabled.
+ * The map is populated from userspace as victims are enabled/disabled.
  */
 #include <linux/bpf.h>
 #include <linux/pkt_cls.h>
@@ -19,9 +19,15 @@ char LICENSE[] SEC("license") = "GPL";
 
 #define ETH_ALEN 6
 
+/* key = 6-byte source MAC, value = 6-byte next-hop (rewrite) MAC. */
 struct mac_key {
     __u8 mac[ETH_ALEN];
 };
+
+/* BTF-style map definitions (aya 0.14 requires these in the `.maps` section
+ * with BTF debug info; the legacy `struct bpf_map_def SEC("maps")` form is no
+ * longer supported by aya 0.11+). The `__uint(...)` macros expand to BTF
+ * metadata that the ELF parser reads to create the maps. */
 
 /* key = 6-byte source MAC, value = 6-byte next-hop (rewrite) MAC. */
 struct {
@@ -42,15 +48,6 @@ struct {
     __type(key, __u32);
     __type(value, struct mac_key);
 } harper_own SEC(".maps");
-
-/* DEV map: key 0 → ifindex of the egress interface.
- * The kernel uses this to redirect the frame without stack traversal. */
-struct {
-    __uint(type, BPF_MAP_TYPE_DEVMAP);
-    __uint(max_entries, 1);
-    __type(key, __u32);
-    __type(value, __u32);
-} egress_iface_map SEC(".maps");
 
 static __always_inline int mac_eq(const __u8 *a, const __u8 *b)
 {
@@ -81,11 +78,10 @@ int harper_relay(struct __sk_buff *skb)
 
     __u8 *next = bpf_map_lookup_elem(&harper_map, &key);
     if (!next)
-        return TC_ACT_SHOT;
+        return TC_ACT_OK; // FIX: Let local traffic pass to the kernel
 
     __builtin_memcpy(eth->h_dest, next, ETH_ALEN);
     __builtin_memcpy(eth->h_source, own, ETH_ALEN);
 
-    bpf_redirect_map(&egress_iface_map, 0, 0);
-    return TC_ACT_REDIRECT;
+    return TC_ACT_OK;
 }

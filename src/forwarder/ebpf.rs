@@ -1,6 +1,6 @@
 // src/forwarder/ebpf.rs
 //
-// Loads the in-kernel MITM relay eBPF programs (compiled from harper-ebpf/
+// Loads the in-kernel MITM relay eBPF programs (compiled from ebpf/
 // via build.rs) and attaches them on the MITM interface.
 //
 // Three backends are available, selected at runtime:
@@ -66,13 +66,13 @@ impl KernelRelay {
                         "XDP not supported on this interface. Try --kernel or --legacy.".into(),
                     );
                 }
-                Self::attach_inner(interface, our_mac, "harper_xdp-ebpf.o", RelayBackend::Xdp)
+                Self::attach_inner(interface, our_mac, "xdp-ebpf.o", RelayBackend::Xdp)
             }
             RelayBackend::TcRedirect => {
                 match Self::attach_inner(
                     interface,
                     our_mac,
-                    "harper_tc-ebpf.o",
+                    "tc-ebpf.o",
                     RelayBackend::TcRedirect,
                 ) {
                     Ok(r) => Ok(r),
@@ -83,7 +83,7 @@ impl KernelRelay {
                         Self::attach_inner(
                             interface,
                             our_mac,
-                            "harper_legacy-ebpf.o",
+                            "legacy-ebpf.o",
                             RelayBackend::TcLegacy,
                         )
                     }
@@ -93,7 +93,7 @@ impl KernelRelay {
                 Self::attach_inner(
                     interface,
                     our_mac,
-                    "harper_legacy-ebpf.o",
+                    "legacy-ebpf.o",
                     RelayBackend::TcLegacy,
                 )
             }

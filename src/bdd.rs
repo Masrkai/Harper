@@ -1761,16 +1761,16 @@ fn bdd_kernel_relay_map_miss_drops() {
 
     let c_path = {
         let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        p.push("harper-ebpf");
-        p.push("harper_tc.bpf.c");
+        p.push("ebpf");
+        p.push("tc.bpf.c");
         p
     };
     let source =
-        std::fs::read_to_string(&c_path).expect("harper_tc.bpf.c must exist for compile-time check");
+        std::fs::read_to_string(&c_path).expect("tc.bpf.c must exist for compile-time check");
 
     assert!(
         source.contains("TC_ACT_SHOT"),
-        "harper_tc.bpf.c must use TC_ACT_SHOT on map miss.\n\
+        "tc.bpf.c must use TC_ACT_SHOT on map miss.\n\
          Run Phase 1.1: change the return after `if (!next)` from TC_ACT_OK to TC_ACT_SHOT."
     );
 }
@@ -1782,26 +1782,26 @@ fn bdd_kernel_relay_lru_eviction() {
 
     let c_path = {
         let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        p.push("harper-ebpf");
-        p.push("harper_tc.bpf.c");
+        p.push("ebpf");
+        p.push("tc.bpf.c");
         p
     };
     let source =
-        std::fs::read_to_string(&c_path).expect("harper_tc.bpf.c must exist for compile-time check");
+        std::fs::read_to_string(&c_path).expect("tc.bpf.c must exist for compile-time check");
 
     assert!(
         source.contains("BPF_MAP_TYPE_LRU_HASH"),
-        "harper_tc.bpf.c must use BPF_MAP_TYPE_LRU_HASH, not BPF_MAP_TYPE_HASH.\n\
+        "tc.bpf.c must use BPF_MAP_TYPE_LRU_HASH, not BPF_MAP_TYPE_HASH.\n\
          Run Phase 1.2: change map type from BPF_MAP_TYPE_HASH to BPF_MAP_TYPE_LRU_HASH."
     );
     assert!(
         source.contains("max_entries, 4096"),
-        "harper_tc.bpf.c must have max_entries = 4096.\n\
+        "tc.bpf.c must have max_entries = 4096.\n\
          Run Phase 1.3: bump 1024 to 4096."
     );
     assert!(
         !source.contains("BPF_F_NO_PREALLOC"),
-        "harper_tc.bpf.c must not use BPF_F_NO_PREALLOC with LRU_HASH.\n\
+        "tc.bpf.c must not use BPF_F_NO_PREALLOC with LRU_HASH.\n\
          Run Phase 1.2: remove BPF_F_NO_PREALLOC (incompatible with LRU)."
     );
 }
@@ -1813,28 +1813,28 @@ fn bdd_kernel_relay_redirect_via_devmap() {
 
     let c_path = {
         let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        p.push("harper-ebpf");
-        p.push("harper_tc.bpf.c");
+        p.push("ebpf");
+        p.push("tc.bpf.c");
         p
     };
     let source =
-        std::fs::read_to_string(&c_path).expect("harper_tc.bpf.c must exist for compile-time check");
+        std::fs::read_to_string(&c_path).expect("tc.bpf.c must exist for compile-time check");
 
     assert!(
         source.contains("BPF_MAP_TYPE_DEVMAP"),
-        "harper_tc.bpf.c must define a DEV map (egress_iface_map)"
+        "tc.bpf.c must define a DEV map (egress_iface_map)"
     );
     assert!(
         source.contains("egress_iface_map"),
-        "harper_tc.bpf.c must name the DEV map egress_iface_map"
+        "tc.bpf.c must name the DEV map egress_iface_map"
     );
     assert!(
         source.contains("bpf_redirect_map"),
-        "harper_tc.bpf.c must use bpf_redirect_map for redirection"
+        "tc.bpf.c must use bpf_redirect_map for redirection"
     );
     assert!(
         source.contains("TC_ACT_REDIRECT"),
-        "harper_tc.bpf.c must return TC_ACT_REDIRECT"
+        "tc.bpf.c must return TC_ACT_REDIRECT"
     );
 }
 
@@ -1852,27 +1852,27 @@ fn bdd_kernel_relay_xdp_preferred() {
     // XDP source exists.
     let c_path = {
         let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        p.push("harper-ebpf");
-        p.push("harper_xdp.bpf.c");
+        p.push("ebpf");
+        p.push("xdp.bpf.c");
         p
     };
     let source = std::fs::read_to_string(&c_path)
-        .expect("harper_xdp.bpf.c must exist");
+        .expect("xdp.bpf.c must exist");
     assert!(
         source.contains("SEC(\"xdp\")"),
-        "harper_xdp.bpf.c must use SEC(\"xdp\")"
+        "xdp.bpf.c must use SEC(\"xdp\")"
     );
     assert!(
         source.contains("xdp_md"),
-        "harper_xdp.bpf.c must operate on xdp_md (not __sk_buff)"
+        "xdp.bpf.c must operate on xdp_md (not __sk_buff)"
     );
     assert!(
         source.contains("XDP_DROP"),
-        "harper_xdp.bpf.c must return XDP_DROP on map miss"
+        "xdp.bpf.c must return XDP_DROP on map miss"
     );
     assert!(
         source.contains("BPF_MAP_TYPE_DEVMAP"),
-        "harper_xdp.bpf.c must include a DEVMAP"
+        "xdp.bpf.c must include a DEVMAP"
     );
 
     // Probe returns false for a non-existent interface.
@@ -1906,25 +1906,25 @@ fn bdd_kernel_relay_xdp_fallback_to_tc() {
     // The tc redirect bpf object must exist.
     let tc_path = {
         let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        p.push("harper-ebpf");
-        p.push("harper_tc.bpf.c");
+        p.push("ebpf");
+        p.push("tc.bpf.c");
         p
     };
     assert!(
         tc_path.exists(),
-        "harper_tc.bpf.c must exist for tc redirect fallback"
+        "tc.bpf.c must exist for tc redirect fallback"
     );
 
     // The legacy bpf object must exist.
     let legacy_path = {
         let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        p.push("harper-ebpf");
-        p.push("harper_legacy.bpf.c");
+        p.push("ebpf");
+        p.push("legacy.bpf.c");
         p
     };
     assert!(
         legacy_path.exists(),
-        "harper_legacy.bpf.c must exist for tc legacy fallback"
+        "legacy.bpf.c must exist for tc legacy fallback"
     );
 }
 
