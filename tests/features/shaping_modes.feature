@@ -69,3 +69,11 @@ Feature: Gateway shaping modes
     And our own IP is 192.168.1.100
     When the uplink 10.9.9.9 is excluded
     Then the excluded IP is our own IP
+
+  Scenario: Dynamic scaling of shared pool bandwidth when victims join and leave
+    Given a pool of 1000 kbps shared across victims 192.168.1.5 and 192.168.1.6
+    When victim 192.168.1.7 joins the pool
+    Then the pool ruleset updates to cover 192.168.1.5, 192.168.1.6 and 192.168.1.7
+    When victim 192.168.1.6 leaves the pool
+    Then the pool ruleset updates to cover only 192.168.1.5 and 192.168.1.7
+

@@ -350,7 +350,7 @@ impl TcManager {
                 Err(e) => return Err(e),
             }
         } else {
-            self.update_rate_classes(slot, pool_upload, pool_download).await?;
+            // Pool class is static once created; do not remove/re-create HTB leaves on re-apply.
         }
 
         let rules = build_nft_pool_rules(victim_ips, pool_upload.is_some(), pool_download.is_some());

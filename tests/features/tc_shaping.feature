@@ -56,3 +56,11 @@ Feature: TcManager real shaping state
     And the tc qdisc-add returns Exclusivity flag on
     Then the qdisc-add wrapper does not propagate the error
     And subsequent pool re-applies do not leak RTNETLINK failures into Auto-MITM
+
+  Scenario: Pool re-applies do not recreate the shared pool class
+    Given a fresh TcManager on interface eth0
+    And a pool rate of 600 kbps is applied with victim 10.0.0.5
+    When a victim is added or removed, updating the pool
+    Then the shared pool class is not deleted and recreated
+    And only the pool ruleset is refreshed
+

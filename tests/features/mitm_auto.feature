@@ -35,3 +35,17 @@ Feature: MITM auto victim lifecycle
     And 192.168.1.7 with mac AA:BB:CC:00:00:07 is seen
     Then a forward Enable command is sent for 192.168.1.5
     And a forward Enable command is sent for 192.168.1.7
+
+  Scenario: An evicted victim re-seen on the wire retains its stable host ID
+    Given a host table with 192.168.1.4
+    And the gateway is 192.168.1.1
+    When 192.168.1.4 is managed and then evicted
+    And 192.168.1.4 with mac 42:fa:fe:44:12:98 is seen again on the wire
+    Then the host retains its original host ID without incrementing
+
+  Scenario: Rapid flapping between active and silent states maintains stable resource allocation
+    Given a host table with 192.168.1.5
+    When the host goes silent, gets evicted, and reappears on the wire immediately
+    Then the manager re-asserts management without duplicating managed entries
+
+

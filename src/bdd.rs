@@ -1259,6 +1259,21 @@ fn bdd_tc_shaping_qdisc_add_tolerates_already_installed() {
     );
 }
 
+#[test]
+fn bdd_tc_shaping_pool_reapplies_persist_class() {
+    let feat = load_feature("tc_shaping");
+    let _sc = scenario_by_name(&feat, "Pool re-applies do not recreate the shared pool class");
+
+    let mut tc = FakeTc::new();
+    let initial = vec![Ipv4Addr::new(10, 0, 0, 5)];
+    tc.limit_pool(600, &initial);
+    let updated = vec![Ipv4Addr::new(10, 0, 0, 5), Ipv4Addr::new(10, 0, 0, 6)];
+    tc.limit_pool(600, &updated);
+
+    assert_eq!(tc.class_creates, 1, "shared pool class must be created exactly once without recreation churn");
+    assert_eq!(tc.pool_calls.len(), 2, "pool ruleset refreshed");
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // MITM auto victim lifecycle (root-free: fake channels capture orchestration)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1488,6 +1503,24 @@ async fn bdd_mitm_auto_late_join_grows_managed() {
     assert!(fwd.contains(&Ipv4Addr::new(192, 168, 1, 5)));
     assert!(fwd.contains(&Ipv4Addr::new(192, 168, 1, 7)));
     assert_eq!(h.mgr.managed_count(), 2, "both victims must be managed");
+}
+
+#[tokio::test]
+async fn bdd_mitm_auto_evicted_victim_retained_stable_id() {
+    let feat = load_feature("mitm_auto");
+    let _sc = scenario_by_name(&feat, "An evicted victim re-seen on the wire retains its stable host ID");
+
+    let mut h = make_mitm_harness(
+        &[("192.168.1.4", "42:fa:fe:44:12:98")],
+        Ipv4Addr::new(192, 168, 1, 1),
+    );
+
+    let id_original = h.table.read().await.get_by_ip(Ipv4Addr::new(192, 168, 1, 4)).unwrap().id;
+
+    h.mgr.on_seen(Ipv4Addr::new(192, 168, 1, 4), MacAddr::new(0x42, 0xfa, 0xfe, 0x44, 0x12, 0x98)).await;
+    
+    let id_after = h.table.read().await.get_by_ip(Ipv4Addr::new(192, 168, 1, 4)).unwrap().id;
+    assert_eq!(id_original, id_after, "evicted victim re-seen must retain its stable host ID");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1893,4 +1926,66 @@ fn bdd_kernel_relay_xdp_fallback_to_tc() {
         legacy_path.exists(),
         "harper_legacy.bpf.c must exist for tc legacy fallback"
     );
+}
+
+#[tokio::test]
+async fn bdd_mitm_auto_flapping_stable_resources() {
+    let feat = load_feature("mitm_auto");
+    let _sc = scenario_by_name(&feat, "Rapid flapping between active and silent states maintains stable resource allocation");
+
+    let mut h = make_mitm_harness(
+        &[("192.168.1.5", "AA:BB:CC:00:00:02")],
+        Ipv4Addr::new(192, 168, 1, 1),
+    );
+
+    h.mgr.on_seen(Ipv4Addr::new(192, 168, 1, 5), MacAddr::new(0xAA, 0xBB, 0xCC, 0x00, 0x00, 0x02)).await;
+    let id_first = h.table.read().await.get_by_ip(Ipv4Addr::new(192, 168, 1, 5)).unwrap().id;
+    
+    h.mgr.on_seen(Ipv4Addr::new(192, 168, 1, 5), MacAddr::new(0xAA, 0xBB, 0xCC, 0x00, 0x00, 0x02)).await;
+    let id_second = h.table.read().await.get_by_ip(Ipv4Addr::new(192, 168, 1, 5)).unwrap().id;
+
+    assert_eq!(id_first, id_second, "flapping host must maintain stable host ID");
+    assert_eq!(h.mgr.managed_count(), 1, "managed count must remain 1 without duplication");
+}
+
+#[test]
+fn bdd_shaping_pool_dynamic_rescaling() {
+    let feat = load_feature("shaping_modes");
+    let _sc = scenario_by_name(&feat, "Dynamic scaling of shared pool bandwidth when victims join and leave");
+
+    let mut tc = FakeTc::new();
+    let mut victims = vec![Ipv4Addr::new(192, 168, 1, 5), Ipv4Addr::new(192, 168, 1, 6)];
+    tc.limit_pool(1000, &victims);
+
+    victims.push(Ipv4Addr::new(192, 168, 1, 7));
+    tc.limit_pool(1000, &victims);
+
+    assert_eq!(tc.pool_calls.len(), 2);
+    assert_eq!(tc.pool_calls[1].2.len(), 3);
+
+    victims.retain(|&ip| ip != Ipv4Addr::new(192, 168, 1, 6));
+    tc.limit_pool(1000, &victims);
+
+    assert_eq!(tc.pool_calls.len(), 3);
+    assert_eq!(tc.pool_calls[2].2.len(), 2);
+    assert!(tc.pool_calls[2].2.contains(&Ipv4Addr::new(192, 168, 1, 5)));
+    assert!(tc.pool_calls[2].2.contains(&Ipv4Addr::new(192, 168, 1, 7)));
+}
+
+#[tokio::test]
+async fn bdd_forwarder_resilient_super_frame_delivery() {
+    let feat = load_feature("forwarder");
+    let _sc = scenario_by_name(&feat, "Resilient delivery of super-frames under intermittent ENOBUFS backpressure");
+
+    use crate::forwarder::engine::PacketForwarder;
+    use crate::forwarder::mock::{MockSender, make_ipv4_frame_padded};
+
+    let mut sender = MockSender::new().fail_with_enobufs(2);
+
+    let frame = make_ipv4_frame_padded(2000, 500);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PacketForwarder::send_with_retry(&mut sender, &frame);
+    }));
+    assert!(result.is_ok(), "super-frame delivery must succeed after ENOBUFS retry");
 }

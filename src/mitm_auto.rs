@@ -104,7 +104,7 @@ impl MitmAutoManager {
         let table = self.host_table.read().await;
         for &id in ids {
             if let Some(entry) = table.get_by_id(id) {
-                self.managed.insert(id, entry.host.last_seen);
+                self.managed.insert(id, Instant::now());
             }
         }
     }
@@ -258,7 +258,6 @@ impl MitmAutoManager {
 
         {
             let mut table = self.host_table.write().await;
-            table.remove(id);
             table.update_state(id, HostState::Discovered);
         }
 

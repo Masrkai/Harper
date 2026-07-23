@@ -25,3 +25,9 @@ Feature: Forwarder packet path
     When a frame is relayed through the forwarder
     Then the sender was attempted exactly once
     And zero frames are delivered
+
+  Scenario: Resilient delivery of super-frames under intermittent ENOBUFS backpressure
+    Given a super-frame exceeding standard MTU with intermittent ENOBUFS errors
+    When relayed through the forwarder with retry backoff
+    Then all fragments are successfully delivered within retry limits
+
