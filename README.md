@@ -46,12 +46,33 @@ build
 ### Quick test
 
 ```bash
-# Run unit + BDD tests (no root needed)
+# Run unit + BDD + declarative mock tests (no root needed)
 cargo test
 
 # Run all tests including live network tests (requires root)
 sudo cargo test -- --ignored
 ```
+
+### Testing on Network Topologies & Declarative Architecture
+
+Harper features a declarative testing architecture combining:
+- **`NetBackend` Trait & `MockBackend`**: In-process mock routing and state simulation running in milliseconds during `cargo test`.
+- **TOML Topologies & Scenarios**: Declarative specs under `tests/topologies/*.toml` and `tests/scenarios/*.toml` parsed with `serde` + `toml` and asserted via `insta` snapshots and `proptest` invariants.
+- **Network Namespaces (`scripts/netns-test.sh`)**: Isolated network topology testing using `ip netns` and veth pairs.
+  ```bash
+  # Enter Nix shell (includes iperf3, jq, etc.)
+  nix-shell
+
+  # Run all topology tests
+  sudo ./scripts/netns-test.sh run all
+
+  # Run a specific topology test (e.g. gateway pool)
+  sudo ./scripts/netns-test.sh run gateway_pool
+
+  # Interactive MITM setup
+  sudo ./scripts/netns-test.sh setup_mitm
+  ```
+- **NixOS VM Integration Tests (`nixos/tests/harper.nix`)**: VM-level end-to-end TC/XDP validation with `iperf3`.
 
 ### Integration test (requires root, iperf3, jq)
 
