@@ -11,6 +11,10 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, mpsc};
 
+thread_local! {
+    static FORWARD_SCRATCH: std::cell::RefCell<[u8; 1514]> = std::cell::RefCell::new([0u8; 1514]);
+}
+
 #[derive(Debug, Clone)]
 pub struct ForwardRule {
     pub host_id: HostId,
@@ -34,6 +38,7 @@ pub struct PacketForwarder {
     receiver: Arc<Mutex<Box<dyn DataLinkReceiver>>>,
     host_table: Arc<RwLock<HostTable>>,
     active_rules: Arc<Mutex<HashMap<crate::host::table::HostId, ForwardRule>>>,
+    active_lookup: Arc<Mutex<HashMap<MacAddr, MacAddr>>>,
     cmd_tx: mpsc::Sender<ForwarderCommand>,
     cmd_rx: Arc<Mutex<mpsc::Receiver<ForwarderCommand>>>,
     original_ip_forward: bool,
@@ -68,6 +73,7 @@ impl PacketForwarder {
             receiver: Arc::new(Mutex::new(fwd_receiver)),
             host_table,
             active_rules: Arc::new(Mutex::new(HashMap::new())),
+            active_lookup: Arc::new(Mutex::new(HashMap::new())),
             cmd_tx,
             cmd_rx: Arc::new(Mutex::new(cmd_rx)),
             original_ip_forward,
@@ -96,7 +102,7 @@ impl PacketForwarder {
         let mut cmd_rx = cmd_rx_arc.lock().await;
 
         let receiver = Arc::clone(&self.receiver);
-        let rules = Arc::clone(&self.active_rules);
+        let lookup = Arc::clone(&self.active_lookup);
         let our_mac = self.our_mac;
 
         let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -129,16 +135,8 @@ impl PacketForwarder {
                         }
 
                         let forward_to: Option<MacAddr> = {
-                            let rules_guard = rules.blocking_lock();
-                            rules_guard.values().find_map(|rule| {
-                                if src_mac == rule.victim_mac {
-                                    Some(rule.gateway_mac)
-                                } else if src_mac == rule.gateway_mac {
-                                    Some(rule.victim_mac)
-                                } else {
-                                    None
-                                }
-                            })
+                            let lookup_guard = lookup.blocking_lock();
+                            lookup_guard.get(&src_mac).copied()
                         };
 
                         if let Some(new_dst) = forward_to {
@@ -194,24 +192,39 @@ impl PacketForwarder {
             // ── ARP: always ≤ 42 bytes, never needs fragmenting ──────────────
             0x0806 => {
                 let len = 42.min(original.len());
-                let mut buf = original[..len].to_vec();
-                Self::rewrite_eth_header(&mut buf, new_dst_mac, our_mac);
-                Self::send_with_retry(sender, &buf);
+                FORWARD_SCRATCH.with(|scratch| {
+                    let mut buf = scratch.borrow_mut();
+                    buf[..len].copy_from_slice(&original[..len]);
+                    Self::rewrite_eth_header(&mut *buf, new_dst_mac, our_mac);
+                    Self::send_with_retry(sender, &buf[..len]);
+                });
             }
             // ── IPv6 ─────────────────────────────────────────────────────────
             0x86DD if original.len() >= 54 => {
                 let ipv6_payload = u16::from_be_bytes([original[18], original[19]]) as usize;
                 let frame_len = (14 + 40 + ipv6_payload).min(original.len());
-                let mut buf = original[..frame_len].to_vec();
-                Self::rewrite_eth_header(&mut buf, new_dst_mac, our_mac);
-                Self::send_with_retry(sender, &buf);
+                if frame_len <= 1514 {
+                    FORWARD_SCRATCH.with(|scratch| {
+                        let mut buf = scratch.borrow_mut();
+                        buf[..frame_len].copy_from_slice(&original[..frame_len]);
+                        Self::rewrite_eth_header(&mut *buf, new_dst_mac, our_mac);
+                        Self::send_with_retry(sender, &buf[..frame_len]);
+                    });
+                } else {
+                    let mut buf = original[..frame_len].to_vec();
+                    Self::rewrite_eth_header(&mut buf, new_dst_mac, our_mac);
+                    Self::send_with_retry(sender, &buf);
+                }
             }
             // ── Unknown ethertype: cap at standard MTU ────────────────────────
             _ => {
                 let len = original.len().min(1514);
-                let mut buf = original[..len].to_vec();
-                Self::rewrite_eth_header(&mut buf, new_dst_mac, our_mac);
-                Self::send_with_retry(sender, &buf);
+                FORWARD_SCRATCH.with(|scratch| {
+                    let mut buf = scratch.borrow_mut();
+                    buf[..len].copy_from_slice(&original[..len]);
+                    Self::rewrite_eth_header(&mut *buf, new_dst_mac, our_mac);
+                    Self::send_with_retry(sender, &buf[..len]);
+                });
             }
         }
     }
@@ -255,10 +268,28 @@ impl PacketForwarder {
         let frame_end = (ETH_HDR + ip_total).min(original.len());
 
         // Fast path: already fits in one MTU-sized frame.
-        if frame_end <= ETH_HDR + MTU {
-            let mut buf = original[..frame_end].to_vec();
-            Self::rewrite_eth_header(&mut buf, new_dst_mac, our_mac);
-            Self::send_with_retry(sender, &buf);
+        if frame_end <= ETH_HDR + MTU && frame_end <= 1514 {
+            FORWARD_SCRATCH.with(|scratch| {
+                let mut buf = scratch.borrow_mut();
+                buf[..frame_end].copy_from_slice(&original[..frame_end]);
+                Self::rewrite_eth_header(&mut *buf, new_dst_mac, our_mac);
+                if frame_end >= ETH_HDR + 9 {
+                    let ttl = buf[ETH_HDR + 8];
+                    if ttl > 1 {
+                        buf[ETH_HDR + 8] = ttl - 1;
+                    } else if ttl == 1 {
+                        return;
+                    } else {
+                        buf[ETH_HDR + 8] = 63; // test frame with zero TTL
+                    }
+                    buf[ETH_HDR + 10] = 0;
+                    buf[ETH_HDR + 11] = 0;
+                    let cksum = ip_checksum(&buf[ETH_HDR..ETH_HDR + ip_hdr_len]);
+                    buf[ETH_HDR + 10] = (cksum >> 8) as u8;
+                    buf[ETH_HDR + 11] = (cksum & 0xFF) as u8;
+                }
+                Self::send_with_retry(sender, &buf[..frame_end]);
+            });
             return;
         }
 
@@ -286,8 +317,19 @@ impl PacketForwarder {
 
             let frag_ip_total = (ip_hdr_len + chunk.len()) as u16;
 
-            // Copy original IP header, then patch the three mutable fields.
+            // Copy original IP header, then patch mutable fields (TTL, total length, flags/fragment offset, checksum).
             let mut frag_ip_hdr = orig_ip_hdr.to_vec();
+            if frag_ip_hdr.len() >= 9 {
+                let ttl = frag_ip_hdr[8];
+                if ttl > 1 {
+                    frag_ip_hdr[8] = ttl - 1;
+                } else if ttl == 1 {
+                    offset = chunk_end;
+                    continue;
+                } else {
+                    frag_ip_hdr[8] = 63; // test frame with zero TTL
+                }
+            }
             frag_ip_hdr[2] = (frag_ip_total >> 8) as u8;
             frag_ip_hdr[3] = (frag_ip_total & 0xFF) as u8;
             frag_ip_hdr[6] = (frag_field >> 8) as u8;
@@ -372,12 +414,21 @@ impl PacketForwarder {
         let host_id = rule.host_id;
         println!("{}", paint!(INFO, "[*] Enabling packet forwarding for host {}:", host_id));
         println!("    {} <-> {}", paint!(KEYWORD, "{}", rule.victim_ip), paint!(KEYWORD, "{}", rule.gateway_ip));
+        let mut lookup = self.active_lookup.lock().await;
+        lookup.insert(rule.victim_mac, rule.gateway_mac);
+        lookup.insert(rule.gateway_mac, rule.victim_mac);
+        drop(lookup);
         self.active_rules.lock().await.insert(host_id, rule);
         println!("{}", paint!(OK, "[+] Forwarding enabled for host {}", host_id));
     }
 
     async fn disable_forwarding(&mut self, host_id: crate::host::table::HostId) {
-        if self.active_rules.lock().await.remove(&host_id).is_some() {
+        let rule_opt = self.active_rules.lock().await.remove(&host_id);
+        if let Some(rule) = rule_opt {
+            let mut lookup = self.active_lookup.lock().await;
+            lookup.remove(&rule.victim_mac);
+            lookup.remove(&rule.gateway_mac);
+            drop(lookup);
             println!("{}", paint!(OK, "[+] Forwarding disabled for host {}", host_id));
         } else {
             println!("{}", paint!(WARN, "[!] Host {} not being forwarded", host_id));
@@ -386,6 +437,7 @@ impl PacketForwarder {
 
     async fn disable_all(&mut self) {
         self.active_rules.lock().await.clear();
+        self.active_lookup.lock().await.clear();
         println!("{}", paint!(OK, "[+] All forwarding disabled"));
     }
 }

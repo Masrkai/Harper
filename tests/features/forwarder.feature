@@ -26,8 +26,19 @@ Feature: Forwarder packet path
     Then the sender was attempted exactly once
     And zero frames are delivered
 
-  Scenario: Resilient delivery of super-frames under intermittent ENOBUFS backpressure
-    Given a super-frame exceeding standard MTU with intermittent ENOBUFS errors
-    When relayed through the forwarder with retry backoff
-    Then all fragments are successfully delivered within retry limits
+   Scenario: Resilient delivery of super-frames under intermittent ENOBUFS backpressure
+     Given a super-frame exceeding standard MTU with intermittent ENOBUFS errors
+     When relayed through the forwarder with retry backoff
+     Then all fragments are successfully delivered within retry limits
+
+   Scenario: Forwarded IPv4 packet has its TTL decremented
+     Given an IPv4 frame with TTL 64
+     When it is relayed through the forwarder
+     Then the delivered frame has TTL 63
+
+   Scenario: Forwarded IPv4 packet with TTL of 1 is dropped
+     Given an IPv4 frame with TTL 1
+     When it is relayed through the forwarder
+     Then zero frames are delivered
+
 

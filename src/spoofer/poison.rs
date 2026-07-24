@@ -128,9 +128,12 @@ impl PoisonLoop {
         let mut gateway_count: u64 = 1;
         let mut garp_count: u64 = 1;
 
-        let mut next_victim = tokio::time::Instant::now() + jitter(VICTIM_INTERVAL_MS);
-        let mut next_gateway = tokio::time::Instant::now() + jitter(GATEWAY_INTERVAL_MS);
-        let mut next_garp = tokio::time::Instant::now() + jitter(GARP_INTERVAL_MS);
+        let ip_u32 = u32::from(target.victim_ip);
+        let phase_offset = (ip_u32 as u64 * 1103515245) % VICTIM_INTERVAL_MS;
+
+        let mut next_victim = tokio::time::Instant::now() + Duration::from_millis(phase_offset) + jitter(VICTIM_INTERVAL_MS);
+        let mut next_gateway = tokio::time::Instant::now() + Duration::from_millis(phase_offset) + jitter(GATEWAY_INTERVAL_MS);
+        let mut next_garp = tokio::time::Instant::now() + Duration::from_millis(phase_offset) + jitter(GARP_INTERVAL_MS);
 
         loop {
             let wake = if self.one_sided {

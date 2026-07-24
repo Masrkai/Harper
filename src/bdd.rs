@@ -20,6 +20,7 @@
 use std::path::PathBuf;
 
 use gherkin::GherkinEnv;
+use pnet::packet::Packet;
 use pnet::util::MacAddr;
 use std::net::Ipv4Addr;
 
@@ -1989,3 +1990,60 @@ async fn bdd_forwarder_resilient_super_frame_delivery() {
     }));
     assert!(result.is_ok(), "super-frame delivery must succeed after ENOBUFS retry");
 }
+
+#[test]
+fn bdd_forwarder_ttl_decrement() {
+    let feat = load_feature("forwarder");
+    let _sc = scenario_by_name(&feat, "Forwarded IPv4 packet has its TTL decremented");
+
+    let mut sender = crate::forwarder::mock::MockSender::new();
+    let mut frame = crate::forwarder::mock::make_ipv4_frame(20);
+    frame[22] = 64;
+
+    crate::forwarder::engine::PacketForwarder::relay_packet(
+        &mut sender,
+        &frame,
+        MacAddr(0x11, 0x22, 0x33, 0x44, 0x55, 0x66),
+        crate::forwarder::mock::OUR_MAC,
+    );
+
+    assert_eq!(sender.sent.len(), 1);
+    let sent_eth = pnet::packet::ethernet::EthernetPacket::new(&sender.sent[0]).unwrap();
+    let ip_payload = sent_eth.payload();
+    assert_eq!(ip_payload[8], 63, "TTL must be decremented from 64 to 63");
+}
+
+#[test]
+fn bdd_forwarder_ttl_expired_drop() {
+    let feat = load_feature("forwarder");
+    let _sc = scenario_by_name(&feat, "Forwarded IPv4 packet with TTL of 1 is dropped");
+
+    let mut sender = crate::forwarder::mock::MockSender::new();
+    let mut frame = crate::forwarder::mock::make_ipv4_frame(20);
+    frame[22] = 1;
+
+    crate::forwarder::engine::PacketForwarder::relay_packet(
+        &mut sender,
+        &frame,
+        MacAddr(0x11, 0x22, 0x33, 0x44, 0x55, 0x66),
+        crate::forwarder::mock::OUR_MAC,
+    );
+
+    assert!(sender.sent.is_empty(), "packet with TTL=1 must be dropped");
+}
+
+#[test]
+fn bdd_spoofer_phase_offsetting() {
+    let feat = load_feature("spoofer");
+    let _sc = scenario_by_name(&feat, "Spoofer applies distinct phase offsets per victim IP");
+
+    let ip1 = Ipv4Addr::new(192, 168, 1, 5);
+    let ip2 = Ipv4Addr::new(192, 168, 1, 6);
+
+    let interval = 25_000u64;
+    let offset1 = (u32::from(ip1) as u64 * 1103515245) % interval;
+    let offset2 = (u32::from(ip2) as u64 * 1103515245) % interval;
+
+    assert_ne!(offset1, offset2, "distinct victim IPs must have distinct initial phase offsets");
+}
+
