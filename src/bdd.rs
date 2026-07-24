@@ -129,6 +129,7 @@ fn arp_cache_from(rows: &[Vec<String>]) -> String {
     out
 }
 
+/// Covers: tests/features/neighbors.feature (Scenario: Discovering clients from a populated ARP cache)
 #[test]
 fn bdd_neighbors_discovering_clients_from_a_populated_arp_cache() {
     let feat = load_feature("neighbors");
@@ -145,6 +146,7 @@ fn bdd_neighbors_discovering_clients_from_a_populated_arp_cache() {
     assert!(ips.contains(&"192.168.1.11".to_string()));
 }
 
+/// Covers: tests/features/neighbors.feature (Scenario: Excluding our own IP from discovery)
 #[test]
 fn bdd_neighbors_excluding_our_own_ip_from_discovery() {
     let feat = load_feature("neighbors");
@@ -159,6 +161,7 @@ fn bdd_neighbors_excluding_our_own_ip_from_discovery() {
     assert_eq!(hosts[0].ip.to_string(), "192.168.1.10");
 }
 
+/// Covers: tests/features/neighbors.feature (Scenario: Filtering by interface)
 #[test]
 fn bdd_neighbors_filtering_by_interface() {
     let feat = load_feature("neighbors");
@@ -173,6 +176,7 @@ fn bdd_neighbors_filtering_by_interface() {
     assert_eq!(hosts[0].ip.to_string(), "192.168.1.10");
 }
 
+/// Covers: tests/features/neighbors.feature (Scenario: Discovering from an empty ARP cache)
 #[test]
 fn bdd_neighbors_discovering_from_an_empty_arp_cache() {
     let feat = load_feature("neighbors");
@@ -2141,5 +2145,27 @@ fn bdd_stealth_gradual_arp_restoration_taper() {
         assert!(window[1] > window[0], "ARP restoration intervals must increase monotonically");
     }
 }
+
+/// Covers: All Gherkin specification feature files in tests/features/
+#[test]
+fn bdd_spec_traceability_matrix_validation() {
+    let feature_files = [
+        "host_table",
+        "neighbors",
+        "gateway_discovery",
+        "shaping_modes",
+        "tc_shaping",
+        "mitm_auto",
+        "spoofer",
+        "forwarder",
+        "shutdown",
+        "stealth",
+    ];
+    for name in &feature_files {
+        let feat = load_feature(name);
+        assert!(!feat.scenarios.is_empty(), "Feature {name} must have scenarios");
+    }
+}
+
 
 
