@@ -2047,3 +2047,48 @@ fn bdd_spoofer_phase_offsetting() {
     assert_ne!(offset1, offset2, "distinct victim IPs must have distinct initial phase offsets");
 }
 
+#[tokio::test]
+async fn bdd_graceful_shutdown_restores_state_in_reverse_order() {
+    let feat = load_feature("shutdown");
+    let _sc = scenario_by_name(&feat, "Ctrl-C triggers full state restoration in reverse order");
+
+    struct OrderedCleanup {
+        name: &'static str,
+        log: std::sync::Arc<tokio::sync::Mutex<Vec<String>>>,
+    }
+
+    impl crate::infra::Cleanupable for OrderedCleanup {
+        fn cleanup(
+            &mut self,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<(), Box<dyn std::error::Error>>> + Send + '_>,
+        > {
+            let name = self.name;
+            let log = std::sync::Arc::clone(&self.log);
+            Box::pin(async move {
+                let mut l = log.lock().await;
+                l.push(name.to_string());
+                Ok(())
+            })
+        }
+    }
+
+    let log = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let mut manager = crate::infra::shutdown::ShutdownManager::new();
+    manager.add(Box::new(OrderedCleanup { name: "kernel_state", log: std::sync::Arc::clone(&log) }));
+    manager.add(Box::new(OrderedCleanup { name: "tc_shaping", log: std::sync::Arc::clone(&log) }));
+    manager.add(Box::new(OrderedCleanup { name: "nftables", log: std::sync::Arc::clone(&log) }));
+    manager.add(Box::new(OrderedCleanup { name: "forwarder", log: std::sync::Arc::clone(&log) }));
+    manager.add(Box::new(OrderedCleanup { name: "arp_restore", log: std::sync::Arc::clone(&log) }));
+
+    manager.shutdown().await;
+
+    let order = log.lock().await;
+    assert_eq!(
+        *order,
+        vec!["arp_restore", "forwarder", "nftables", "tc_shaping", "kernel_state"],
+        "components must be cleaned up in reverse order of registration"
+    );
+}
+
+
