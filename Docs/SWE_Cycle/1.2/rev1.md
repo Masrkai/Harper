@@ -7,7 +7,7 @@
 
 ## Implementation Status
 
-### Phase 1 — Core Infrastructure ✅
+### Phase 1 — Core Infrastructure - Completed
 
 | Component | Source | Notes |
 |---|---|---|
@@ -20,7 +20,7 @@
 
 ---
 
-### Phase 2 — MITM Engine ✅
+### Phase 2 — MITM Engine - Completed
 
 | Component | Source | Notes |
 |---|---|---|
@@ -35,7 +35,7 @@
 
 ---
 
-### Phase 3 — Traffic Control ✅
+### Phase 3 — Traffic Control - Completed
 
 | Component | Source | Notes |
 |---|---|---|
@@ -52,11 +52,11 @@
 
 ---
 
-### Phase 4 — TUI & Monitoring ⚠️ Partial
+### Phase 4 — TUI & Monitoring - Partial
 
 | Component | Status | Notes |
 |---|---|---|
-| CLI argument parsing | ✅ | `clap` derive in `src/main.rs` — interface, gateway, target, bandwidth, gateway-mode flags |
+| CLI argument parsing | - Completed | `clap` derive in `src/main.rs` — interface, gateway, target, bandwidth, gateway-mode flags |
 | Interactive shell loop | ❌ | Not implemented. Program runs until Ctrl-C or `q` + Enter |
 | `ratatui` TUI / live graphs | ❌ | Not implemented |
 | Per-host bandwidth stats | ❌ | `tc -s class show` output is not parsed or surfaced |
@@ -64,7 +64,7 @@
 
 ---
 
-### Phase 5 — Hardening ✅
+### Phase 5 — Hardening - Completed
 
 | Component | Source | Notes |
 |---|---|---|
