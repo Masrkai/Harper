@@ -2091,4 +2091,55 @@ async fn bdd_graceful_shutdown_restores_state_in_reverse_order() {
     );
 }
 
+#[test]
+fn bdd_stealth_non_ip_traffic_passthrough() {
+    let feat = load_feature("stealth");
+    let _sc = scenario_by_name(&feat, "Non-IP traffic such as ARP frames pass through safely");
+
+    let mut sender = crate::forwarder::mock::MockSender::new();
+    let frame = crate::forwarder::mock::make_arp_frame();
+
+    crate::forwarder::engine::PacketForwarder::relay_packet(
+        &mut sender,
+        &frame,
+        MacAddr(0x11, 0x22, 0x33, 0x44, 0x55, 0x66),
+        crate::forwarder::mock::OUR_MAC,
+    );
+
+    assert_eq!(sender.sent.len(), 1, "ARP frames must pass through unmodified");
+}
+
+#[test]
+fn bdd_stealth_fragmented_ipv4_ttl_decrement() {
+    let feat = load_feature("stealth");
+    let _sc = scenario_by_name(&feat, "Fragmented IPv4 packets have TTL decremented across fragments");
+
+    let mut sender = crate::forwarder::mock::MockSender::new();
+    let frame = crate::forwarder::mock::make_ipv4_frame(3000);
+
+    crate::forwarder::engine::PacketForwarder::relay_packet(
+        &mut sender,
+        &frame,
+        MacAddr(0x11, 0x22, 0x33, 0x44, 0x55, 0x66),
+        crate::forwarder::mock::OUR_MAC,
+    );
+
+    assert!(!sender.sent.is_empty(), "Fragmented frames must be relayed successfully");
+    for sent_frame in &sender.sent {
+        let ttl = sent_frame[14 + 8];
+        assert_eq!(ttl, 63, "Fragment TTL must be decremented to 63");
+    }
+}
+
+#[test]
+fn bdd_stealth_gradual_arp_restoration_taper() {
+    let feat = load_feature("stealth");
+    let _sc = scenario_by_name(&feat, "Gradual ARP restoration taper runs over increasing intervals");
+
+    let intervals = [100u64, 200, 500, 1000, 2000, 3000, 5000];
+    for window in intervals.windows(2) {
+        assert!(window[1] > window[0], "ARP restoration intervals must increase monotonically");
+    }
+}
+
 

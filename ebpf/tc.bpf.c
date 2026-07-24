@@ -12,6 +12,7 @@
 #include <linux/bpf.h>
 #include <linux/pkt_cls.h>
 #include <linux/if_ether.h>
+#include <linux/ip.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
@@ -82,6 +83,20 @@ int harper_relay(struct __sk_buff *skb)
     __u8 *next = bpf_map_lookup_elem(&harper_map, &key);
     if (!next)
         return TC_ACT_SHOT;
+
+    if (eth->h_proto == bpf_htons(ETH_P_IP)) {
+        struct iphdr *iph = (struct iphdr *)(eth + 1);
+        if ((void *)(iph + 1) <= data_end) {
+            if (iph->ttl <= 1) {
+                return TC_ACT_OK;
+            }
+            __u16 *ttl_proto = (__u16 *)&iph->ttl;
+            __u16 old_val = *ttl_proto;
+            iph->ttl--;
+            __u16 new_val = *ttl_proto;
+            bpf_l3_csum_replace(skb, sizeof(struct ethhdr) + offsetof(struct iphdr, check), old_val, new_val, 2);
+        }
+    }
 
     __builtin_memcpy(eth->h_dest, next, ETH_ALEN);
     __builtin_memcpy(eth->h_source, own, ETH_ALEN);
