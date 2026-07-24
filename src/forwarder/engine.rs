@@ -719,4 +719,18 @@ mod tests {
     //     hdr[11] = (cksum & 0xFF) as u8;
     //     assert_eq!(ip_checksum(&hdr), 0xFFFF, "checksum of complete header must be 0xFFFF");
     // }
+
+    proptest::proptest! {
+        #[test]
+        fn prop_ipv4_packet_relay_invariants(payload_len in 20usize..1500) {
+            let mut sender = MockSender::new();
+            let frame = make_ipv4_frame(payload_len);
+            PacketForwarder::relay_packet(&mut sender, &frame, NEW_DST_MAC, OUR_MAC);
+            if !sender.sent.is_empty() {
+                for sent in &sender.sent {
+                    assert_eq!(&sent[6..12], &OUR_MAC.octets());
+                }
+            }
+        }
+    }
 }

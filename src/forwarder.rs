@@ -1,5 +1,6 @@
 pub mod ebpf;
 pub mod engine;
+pub mod backend;
 #[cfg(test)]
 pub(crate) mod mock;
 

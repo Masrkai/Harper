@@ -1,0 +1,21 @@
+# tests/topologies/two-hosts.toml
+[topology]
+driver = "mock"
+
+[[namespaces]]
+name = "client"
+interfaces = [{ name = "c0", addr = "10.0.0.2/24", mac = "aa:00:00:00:00:01" }]
+routes = [{ dst = "10.0.0.0/24", dev = "c0" }]
+
+[[namespaces]]
+name = "router"
+forwarder = true
+interfaces = [
+  { name = "r0", addr = "10.0.0.1/24", mac = "aa:00:00:00:00:02", peer = "c0" },
+  { name = "r1", addr = "10.1.0.1/24", mac = "aa:00:00:00:00:03", peer = "s0" },
+]
+
+[[namespaces]]
+name = "server"
+interfaces = [{ name = "s0", addr = "10.1.0.2/24", mac = "aa:00:00:00:00:04" }]
+routes = [{ dst = "default", via = "10.1.0.1", dev = "s0" }]

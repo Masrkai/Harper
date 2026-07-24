@@ -1,0 +1,75 @@
+---
+source: src/forwarder/backend.rs
+expression: parsed
+---
+Table(
+    {
+        "backend": String(
+            "mock",
+        ),
+        "steps": Table(
+            {
+                "expect": Array(
+                    [
+                        Table(
+                            {
+                                "count": Integer(
+                                    10,
+                                ),
+                                "match": Table(
+                                    {
+                                        "payload_contains": String(
+                                            "hello",
+                                        ),
+                                    },
+                                ),
+                                "observe": String(
+                                    "mock",
+                                ),
+                                "where": String(
+                                    "server",
+                                ),
+                                "within": String(
+                                    "500ms",
+                                ),
+                            },
+                        ),
+                    ],
+                ),
+                "send": Array(
+                    [
+                        Table(
+                            {
+                                "count": Integer(
+                                    10,
+                                ),
+                                "from": String(
+                                    "client",
+                                ),
+                                "packet": Table(
+                                    {
+                                        "dst": String(
+                                            "10.1.0.2:80",
+                                        ),
+                                        "payload": String(
+                                            "hello",
+                                        ),
+                                        "src": String(
+                                            "10.0.0.2:1234",
+                                        ),
+                                        "type": String(
+                                            "tcp",
+                                        ),
+                                    },
+                                ),
+                            },
+                        ),
+                    ],
+                ),
+            },
+        ),
+        "topology": String(
+            "two-hosts",
+        ),
+    },
+)

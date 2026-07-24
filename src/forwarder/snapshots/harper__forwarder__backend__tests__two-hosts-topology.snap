@@ -1,0 +1,144 @@
+---
+source: src/forwarder/backend.rs
+expression: parsed
+---
+Table(
+    {
+        "namespaces": Array(
+            [
+                Table(
+                    {
+                        "interfaces": Array(
+                            [
+                                Table(
+                                    {
+                                        "addr": String(
+                                            "10.0.0.2/24",
+                                        ),
+                                        "mac": String(
+                                            "aa:00:00:00:00:01",
+                                        ),
+                                        "name": String(
+                                            "c0",
+                                        ),
+                                    },
+                                ),
+                            ],
+                        ),
+                        "name": String(
+                            "client",
+                        ),
+                        "routes": Array(
+                            [
+                                Table(
+                                    {
+                                        "dev": String(
+                                            "c0",
+                                        ),
+                                        "dst": String(
+                                            "10.0.0.0/24",
+                                        ),
+                                    },
+                                ),
+                            ],
+                        ),
+                    },
+                ),
+                Table(
+                    {
+                        "forwarder": Boolean(
+                            true,
+                        ),
+                        "interfaces": Array(
+                            [
+                                Table(
+                                    {
+                                        "addr": String(
+                                            "10.0.0.1/24",
+                                        ),
+                                        "mac": String(
+                                            "aa:00:00:00:00:02",
+                                        ),
+                                        "name": String(
+                                            "r0",
+                                        ),
+                                        "peer": String(
+                                            "c0",
+                                        ),
+                                    },
+                                ),
+                                Table(
+                                    {
+                                        "addr": String(
+                                            "10.1.0.1/24",
+                                        ),
+                                        "mac": String(
+                                            "aa:00:00:00:00:03",
+                                        ),
+                                        "name": String(
+                                            "r1",
+                                        ),
+                                        "peer": String(
+                                            "s0",
+                                        ),
+                                    },
+                                ),
+                            ],
+                        ),
+                        "name": String(
+                            "router",
+                        ),
+                    },
+                ),
+                Table(
+                    {
+                        "interfaces": Array(
+                            [
+                                Table(
+                                    {
+                                        "addr": String(
+                                            "10.1.0.2/24",
+                                        ),
+                                        "mac": String(
+                                            "aa:00:00:00:00:04",
+                                        ),
+                                        "name": String(
+                                            "s0",
+                                        ),
+                                    },
+                                ),
+                            ],
+                        ),
+                        "name": String(
+                            "server",
+                        ),
+                        "routes": Array(
+                            [
+                                Table(
+                                    {
+                                        "dev": String(
+                                            "s0",
+                                        ),
+                                        "dst": String(
+                                            "default",
+                                        ),
+                                        "via": String(
+                                            "10.1.0.1",
+                                        ),
+                                    },
+                                ),
+                            ],
+                        ),
+                    },
+                ),
+            ],
+        ),
+        "topology": Table(
+            {
+                "driver": String(
+                    "mock",
+                ),
+            },
+        ),
+    },
+)

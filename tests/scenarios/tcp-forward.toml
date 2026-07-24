@@ -1,0 +1,16 @@
+# tests/scenarios/tcp-forward.toml
+topology = "two-hosts"
+backend = "mock"
+
+[steps]
+  [[steps.send]]
+  from = "client"
+  packet = { type = "tcp", src = "10.0.0.2:1234", dst = "10.1.0.2:80", payload = "hello" }
+  count = 10
+
+  [[steps.expect]]
+  where = "server"
+  observe = "mock"
+  match = { payload_contains = "hello" }
+  count = 10
+  within = "500ms"
